@@ -1,4 +1,4 @@
-/* hunspell-bench.c --- apples-to-apples C benchmark for vibe-spell-bench.el
+/* hunspell-bench-check.c --- apples-to-apples C benchmark for vibe-spell-bench.el
  *
  * Measures how long Hunspell_create() takes to load a dictionary, and
  * how long Hunspell_spell() then takes to check every word of a file,
@@ -16,11 +16,11 @@
  * does no conversion of its own; some dictionaries (e.g. pt_BR) are
  * not UTF-8.
  *
- * Usage: hunspell-bench DICT-NAME FILE
+ * Usage: hunspell-bench-check DICT-NAME FILE
  * DICT-NAME is looked up as /usr/share/hunspell/DICT-NAME.{aff,dic},
  * matching `vibe-spell-dictionary-path''s default.
  *
- * Build: cc -O2 -o hunspell-bench hunspell-bench.c \
+ * Build: cc -O2 -o hunspell-bench-check hunspell-bench-check.c \
  *            $(pkg-config --cflags --libs hunspell)
  */
 
@@ -74,18 +74,18 @@ read_file(const char *path, long *size)
 {
 	FILE *f = fopen(path, "rb");
 	if (!f) {
-		fprintf(stderr, "hunspell-bench: %s: %s\n", path, strerror(errno));
+		fprintf(stderr, "hunspell-bench-check: %s: %s\n", path, strerror(errno));
 		exit(1);
 	}
 	if (fseek(f, 0, SEEK_END) != 0) {
-		fprintf(stderr, "hunspell-bench: %s: cannot seek\n", path);
+		fprintf(stderr, "hunspell-bench-check: %s: cannot seek\n", path);
 		exit(1);
 	}
 	long len = ftell(f);
 	fseek(f, 0, SEEK_SET);
 	char *buf = malloc((size_t)len + 1);
 	if (!buf) {
-		fprintf(stderr, "hunspell-bench: out of memory\n");
+		fprintf(stderr, "hunspell-bench-check: out of memory\n");
 		exit(1);
 	}
 	size_t got = fread(buf, 1, (size_t)len, f);
@@ -108,7 +108,7 @@ main(int argc, char **argv)
 	/* Unicode-aware iswalpha() needs a UTF-8 locale. */
 	if (!setlocale(LC_CTYPE, "C.UTF-8") && !setlocale(LC_CTYPE, "en_US.UTF-8")
 	    && !setlocale(LC_CTYPE, ""))
-		fprintf(stderr, "hunspell-bench: warning: no UTF-8 locale available\n");
+		fprintf(stderr, "hunspell-bench-check: warning: no UTF-8 locale available\n");
 
 	char aff_path[4096], dic_path[4096];
 	snprintf(aff_path, sizeof aff_path, "/usr/share/hunspell/%s.aff", dict_name);
@@ -118,7 +118,7 @@ main(int argc, char **argv)
 	Hunhandle *h = Hunspell_create(aff_path, dic_path);
 	double load_seconds = now() - t0;
 	if (!h) {
-		fprintf(stderr, "hunspell-bench: could not load dictionary %s\n", dict_name);
+		fprintf(stderr, "hunspell-bench-check: could not load dictionary %s\n", dict_name);
 		return 1;
 	}
 
@@ -130,7 +130,7 @@ main(int argc, char **argv)
 	if (strcmp(dic_encoding, "UTF-8") != 0) {
 		cd = iconv_open(dic_encoding, "UTF-8");
 		if (cd == (iconv_t)-1) {
-			fprintf(stderr, "hunspell-bench: iconv_open UTF-8 -> %s: %s\n",
+			fprintf(stderr, "hunspell-bench-check: iconv_open UTF-8 -> %s: %s\n",
 			        dic_encoding, strerror(errno));
 			return 1;
 		}

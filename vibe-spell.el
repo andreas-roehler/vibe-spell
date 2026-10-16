@@ -30,19 +30,37 @@
 ;; functions with little incidental state, which maps much more
 ;; directly onto Lisp than Hunspell's.
 ;;
-;; Only checking (`vibe-spell-check') is implemented; `vibe-spell-suggest'
-;; is not.  Within checking, the following simplifications were made
-;; relative to upstream Nuspell, mostly to leave out machinery that
-;; exists in Nuspell only to support suggestions:
+;; Both checking (`vibe-spell-check') and suggestions
+;; (`vibe-spell-suggest') are implemented, the latter following
+;; Nuspell's `Suggester' (with occasional reference to Hunspell's own
+;; `SuggestMgr' for comparison).  The following simplifications were
+;; made relative to upstream Nuspell:
 ;;
 ;; - Dictionaries that set COMPLEXPREFIXES (double prefix stripping,
 ;;   used by a handful of languages) are rejected at `vibe-spell-create'
 ;;   time.
-;; - ICONV/OCONV, MAP, REP, PHONE, KEY and TRY are not parsed; these
-;;   only matter for Nuspell's suggestion generator.  CHECKCOMPOUNDREP,
-;;   which also consults the REP table, is accepted but has no effect.
+;; - CHECKCOMPOUNDREP, which consults the REP table, is accepted but
+;;   has no effect, same as in the checking-only port below it.
 ;; - CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not
 ;;   enforced.
+;; - PHONE (phonetic suggestions, a Hunspell-only feature that
+;;   Nuspell's own `Suggester' never calls either) is not parsed.
+;; - MAXCPDSUGS, SUBSTANDARD, NOSPLITSUGS and SUGSWITHDOTS are not
+;;   parsed; Nuspell itself parses these but its `Suggester' never
+;;   consults them, so they would have no effect here either.
+;; - Nuspell's suggestion-casing-fix loop, which moves a
+;;   newly-recased, space-containing CAMEL/PASCAL suggestion to the
+;;   front of the list one at a time, is instead done as a single
+;;   stable partition (recased suggestions first, in their original
+;;   relative order); when more than one suggestion qualifies, their
+;;   relative order can come out differently than upstream's.
+;; - `-move-char-suggest' and `-distant-swap-suggest' enumerate
+;;   candidate character moves/swaps directly instead of Nuspell's
+;;   swap-and-revert traversal; the budget used to cap either
+;;   algorithm is still consulted once per candidate, as upstream
+;;   does, but exhausting it while moving through backward moves,
+;;   candidates that upstream's forward-then-backward traversal order
+;;   would have tried first may be skipped instead.
 ;; - SIMPLIFIEDTRIPLE's extra "insert the elided letter back and
 ;;   retry" fallback is not implemented; CHECKCOMPOUNDTRIPLE itself is.
 ;; - COMPOUNDSYLLABLE/SYLLABLENUM, the Hungarian-specific syllable
@@ -95,6 +113,12 @@ The first file to be found is used to save additional words.  If none of
 the files exist, create one from the first item of the list."
   :type '(choice string (repeat string)))
 
+(defvar -max-word-length
+  (1+ (length "\
+Donaudampfschiffahrtselektrizitätenhauptbetriebswerkbauunterbeamtengesellschaft"))
+  "Maximum word length accepted by the spell checker.
+Longer words are always reported as correct.")
+
 ;;; Public API
 
 (defun vibe-spell-create (dict)
@@ -102,8 +126,7 @@ the files exist, create one from the first item of the list."
 DICT is a dictionary name, such as \"en_US\"; the files DICT.aff and
 DICT.dic are looked up under `vibe-spell-dictionary-path'.
 
-This only supports checking; see `vibe-spell-check'.  Suggestions
-\(`vibe-spell-suggest') are not implemented.  See the Commentary at
+See `vibe-spell-check' and `vibe-spell-suggest'; see the Commentary at
 the top of this file for the limitations of this port.
 
 Additional words accepted via `vibe-spell-add-word' in a past session
@@ -128,9 +151,14 @@ are loaded from the personal dictionary file named by
 DICT is a spell checker object created by `vibe-spell-create'."
   (or (length> word 100) (-spell dict word)))
 
-(defun vibe-spell-suggest (_dict _word)
-  "Return a list of corrections for WORD based on DICT."
-  (error "vibe-spell-suggest is not yet implemented"))
+(defun vibe-spell-suggest (dict word)
+  "Return a list of corrections for WORD based on DICT.
+DICT is a spell checker object created by `vibe-spell-create'.  Return
+nil, without error, if WORD is too long for suggestions to be
+attempted; see the 360-character limit note in the Commentary at the
+top of this file."
+  (unless (length> word -max-word-length)
+    (-suggest-priv dict word)))
 
 (defun vibe-spell-add-word (dict word &optional save)
   "Add WORD to DICT, and optionally SAVE to personal dictionary file.
@@ -141,6 +169,23 @@ so that it is picked up again by a later `vibe-spell-create'."
   (-dict-add-word dict word nil)
   (when save
     (-save-personal-word (-dict-pdict dict) word)))
+
+(defun vibe-spell-remove-word (dict word &optional save)
+  "Remove WORD from DICT, and optionally SAVE that to the personal dictionary file.
+DICT is a spell checker object created by `vibe-spell-create'.  This
+undoes one `vibe-spell-add-word' call for WORD; an entry for WORD that
+came from the dictionary's own .dic file, rather than from
+`vibe-spell-add-word', is left alone.  When SAVE is non-nil, also
+remove WORD from DICT's personal dictionary file (see
+`vibe-spell-personal-dictionary-format'), if it is there, so that a
+later `vibe-spell-create' does not load it back.
+
+Return non-nil if WORD was removed, nil if it was not there to begin
+with."
+  (let ((removed (-dict-remove-word dict word)))
+    (when save
+      (-remove-personal-word (-dict-pdict dict) word))
+    removed))
 
 ;;; Implementation
 
@@ -166,10 +211,9 @@ return the last body value.
          (setq ,result ,(macroexp-progn body))
          (setq ,tail (if ,result
                          ,(when (length= spec 3)
-                            `(progn
-                               (setq ,result ,(macroexp-progn (cddr spec)))
-                               nil))
-                         (cdr ,tail))))
+                            `(prog1 nil
+                               (setq ,result ,(macroexp-progn (cddr spec)))))
+                       (cdr ,tail))))
        ,result)))
 
 (defun -find-dictionary-base (name)
@@ -185,11 +229,7 @@ error if no directory in the list has both files."
                base)))
       (user-error "\
 vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
-             name name)))
-
-(defconst -hidden-homonym-flag -1
-  "Sentinel flag marking a dictionary entry as hidden from direct lookup.
-Mirrors Nuspell's `Aff_Data::HIDDEN_HOMONYM_FLAG'.  See `-dict-add-word'.")
+                  name name)))
 
 ;;;; Data structures
 
@@ -198,6 +238,10 @@ Mirrors Nuspell's `Aff_Data::HIDDEN_HOMONYM_FLAG'.  See `-dict-add-word'.")
 
 (cl-defstruct (-suffix (:constructor -suffix-create))
   flag cross-product stripping appending cont-flags condition)
+
+(cl-defstruct (-similarity-group (:constructor -similarity-group-create))
+  "One MAP entry: a set of characters/strings considered interchangeable."
+  (chars "") (strings nil))
 
 (cl-defstruct (-dict (:constructor -dict-create))
   (words nil)                          ; hash-table: word -> list of flag lists
@@ -232,7 +276,18 @@ Mirrors Nuspell's `Aff_Data::HIDDEN_HOMONYM_FLAG'.  See `-dict-add-word'.")
   (compound-force-uppercase 0)
   (compound-check-duplicate nil)
   (compound-check-case nil)
-  (compound-check-triple nil))
+  (compound-check-triple nil)
+  ;; suggestion options
+  (try-chars "")
+  (keyboard-closeness "")
+  (rep-whole nil) (rep-start nil) (rep-end nil) (rep-any nil)
+  (similarities nil)                   ; list of `-similarity-group'
+  (input-iconv nil)                    ; sorted list of (FROM . TO), see `-substr-replace'
+  (output-oconv nil)
+  (nosuggest-flag 0)
+  (max-ngram-suggestions 4)
+  (max-diff-factor 5)
+  (only-max-diff nil))
 
 ;;;; Flags and flag sets
 
@@ -278,9 +333,20 @@ the affix file's FLAG directive (default `single-char')."
 A FLAG of 0 means \"not configured\" and never matches, mirroring
 Nuspell, where such flag fields default to 0 when the corresponding
 affix-file directive is absent."
-  (and (/= flag 0) (memql flag flags) t))
+  (and (not (zerop flag)) (memq flag flags) t))
 
-(defun -cross-valid-p (inner-flags outer-flag)
+(defsubst -hidden-homonym-p (flags)
+  "Return non-nil if flag list FLAGS marks a dictionary entry as a hidden homonym.
+A hidden homonym is excluded from direct lookup, so that checking the
+title-cased form of a word whose canonical form has different casing
+(e.g. an acronym) falls through to other checks rather than accepting
+it outright; see `-dict-add-word'.  Mirrors Nuspell's
+`Aff_Data::HIDDEN_HOMONYM_FLAG', represented here by the literal flag
+-1 -- never a valid flag otherwise, since real flags are always
+non-negative."
+  (memq -1 flags))
+
+(defsubst -cross-valid-p (inner-flags outer-flag)
   "Return non-nil if INNER-FLAGS (a flag list) contains OUTER-FLAG."
   (-flags-contain inner-flags outer-flag))
 
@@ -450,6 +516,11 @@ appending text for prefixes, or its reverse for suffixes); see
   (let ((table (vconcat (mapcar (lambda (e) (cons (funcall key-fn e) e)) entries))))
     (sort table (lambda (a b) (string< (car a) (car b))))))
 
+(defun -all-affix-table-entries (table)
+  "Return the `-prefix'/`-suffix' entries of affix TABLE as a plain list.
+Unlike `-affix-table-matches', this does not filter by any probe word."
+  (mapcar #'cdr (append table nil)))
+
 (defun -iterate-prefixes-of (dict word)
   "Return the `-prefix' entries of DICT whose text could precede WORD."
   (-affix-table-matches (-dict-prefix-table dict) word))
@@ -465,6 +536,15 @@ appending text for prefixes, or its reverse for suffixes); see
 (defun -suffix-to-root (sfx word)
   (let ((n (length (-suffix-appending sfx))))
     (concat (substring word 0 (- (length word) n)) (-suffix-stripping sfx))))
+
+(defun -prefix-from-root (pfx root)
+  "Apply PFX to ROOT, the opposite direction of `-prefix-to-root'."
+  (concat (-prefix-appending pfx) (substring root (length (-prefix-stripping pfx)))))
+
+(defun -suffix-from-root (sfx root)
+  "Apply SFX to ROOT, the opposite direction of `-suffix-to-root'."
+  (let ((n (length (-suffix-stripping sfx))))
+    (concat (substring root 0 (- (length root) n)) (-suffix-appending sfx))))
 
 (defun -prefix-check-condition (pfx word)
   (-condition-match-prefix (-prefix-condition pfx) word))
@@ -547,7 +627,7 @@ without ever building that root string; see
              (and (-cross-valid-p flags (-suffix-flag se))
                   (not (and (eq mode :full-word)
                             (-flags-contain flags (-dict-compound-onlyin-flag dict))))
-                  (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                  (not (and skip-hidden (-hidden-homonym-p flags)))
                   (or (-valid-inside-compound-p dict mode flags)
                       (-valid-inside-compound-p dict mode (-suffix-cont-flags se)))
                   (cons root flags)))))))
@@ -562,7 +642,7 @@ without ever building that root string; see
              (and (-cross-valid-p flags (-prefix-flag pe))
                   (not (and (eq mode :full-word)
                             (-flags-contain flags (-dict-compound-onlyin-flag dict))))
-                  (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                  (not (and skip-hidden (-hidden-homonym-p flags)))
                   (or (-valid-inside-compound-p dict mode flags)
                       (-valid-inside-compound-p dict mode (-prefix-cont-flags pe)))
                   (cons root flags)))))))
@@ -607,7 +687,7 @@ Nuspell's \"commutative\" variant does."
                         (and (or valid-pe-outer valid-se-outer)
                              (not (and (eq mode :full-word)
                                        (-flags-contain flags (-dict-compound-onlyin-flag dict))))
-                             (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                             (not (and skip-hidden (-hidden-homonym-p flags)))
                              (or (-valid-inside-compound-p dict mode flags)
                                  (-valid-inside-compound-p dict mode se-cont)
                                  (-valid-inside-compound-p dict mode pe-cont))
@@ -631,7 +711,7 @@ Nuspell's \"commutative\" variant does."
            (-dolist-until (flags (gethash root (-dict-words dict)))
              (and (-cross-valid-p flags (-suffix-flag se2))
                   (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
-                  (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                  (not (and skip-hidden (-hidden-homonym-p flags)))
                   (cons root flags)))))))
 
 (defun -strip-prefix-then-2-suffixes (dict word skip-hidden)
@@ -661,7 +741,7 @@ Nuspell's \"commutative\" variant does."
                       (-cross-valid-p flags (-prefix-flag pe1)))
                   (-cross-valid-p flags (-suffix-flag se2))
                   (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
-                  (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                  (not (and skip-hidden (-hidden-homonym-p flags)))
                   (cons root flags)))))))
 
 (defun -strip-suffix-prefix-suffix (dict word skip-hidden)
@@ -696,7 +776,7 @@ Nuspell's \"commutative\" variant does."
                              (-cross-valid-p flags (-prefix-flag pe1)))
                          (-cross-valid-p flags (-suffix-flag se2))
                          (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
-                         (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                         (not (and skip-hidden (-hidden-homonym-p flags)))
                          (cons root flags)))))))))
 
 ;;;; Simple (non-compound) word checking
@@ -708,7 +788,7 @@ above for the shape of the result."
   (or (-dolist-until (flags (gethash word (-dict-words dict)))
         (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
                       (-flags-contain flags (-dict-compound-onlyin-flag dict))
-                      (and skip-hidden (-flags-contain flags -hidden-homonym-flag))))
+                      (and skip-hidden (-hidden-homonym-p flags))))
              (cons word flags)))
       (-strip-suffix-only dict :full-word word skip-hidden)
       (-strip-prefix-only dict :full-word word skip-hidden)
@@ -723,21 +803,21 @@ above for the shape of the result."
   "Check WORD as one part of a compound, in position MODE.
 MODE is :compound-begin, :compound-middle or :compound-end."
   (let ((cpd-flag (cond ((eq mode :compound-begin) (-dict-compound-begin-flag dict))
-                         ((eq mode :compound-middle) (-dict-compound-middle-flag dict))
-                         ((eq mode :compound-end) (-dict-compound-last-flag dict))
-                         (t 0))))
+                        ((eq mode :compound-middle) (-dict-compound-middle-flag dict))
+                        ((eq mode :compound-end) (-dict-compound-last-flag dict))
+                        (t 0))))
     (or (-dolist-until (flags (gethash word (-dict-words dict)))
           (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
                         (not (or (-flags-contain flags (-dict-compound-flag dict))
                                  (-flags-contain flags cpd-flag)))
-                        (-flags-contain flags -hidden-homonym-flag)))
+                        (-hidden-homonym-p flags)))
                (cons word flags)))
         (-strip-suffix-only dict mode word t)
         (-strip-prefix-only dict mode word t)
         (-strip-prefix-then-suffix-commutative dict mode word t))))
 
 (defun -char-alpha-p (ch) (memq (get-char-code-property ch 'general-category)
-                                 '(Ll Lu Lo Lm Lt)))
+                                '(Ll Lu Lo Lm Lt)))
 (defun -char-upper-p (ch) (/= ch (downcase ch)))
 (defun -char-lower-p (ch) (/= ch (upcase ch)))
 
@@ -790,13 +870,13 @@ matching the position of the first part."
 (defun -check-compound-split (dict mode word start-pos num-part allow-bad-forceucase)
   "Try every split point of WORD[START-POS:] respecting COMPOUNDMIN."
   (let* ((min-len (if (/= 0 (-dict-compound-min-length dict))
-                       (-dict-compound-min-length dict)
-                     3))
+                      (-dict-compound-min-length dict)
+                    3))
          (len (length word)))
     (and (>= (- len start-pos) (* 2 min-len))
          (-dolist-until (i (number-sequence (+ start-pos min-len) (- len min-len)))
            (-check-compound-classic dict mode word start-pos i num-part
-                                     allow-bad-forceucase)))))
+                                    allow-bad-forceucase)))))
 
 (defun -compound-rules-has-any-flag-p (dict flags)
   (any (lambda (f) (-flags-contain flags f)) (-dict-compound-rules-all-flags dict)))
@@ -837,8 +917,8 @@ PATTERN is a list of (FLAG . QUANT), QUANT one of nil, ?? or ?*."
 WORDS-DATA is the flag lists of the ancestor parts already matched,
 most recent first."
   (let* ((min-len (if (/= 0 (-dict-compound-min-length dict))
-                       (-dict-compound-min-length dict)
-                     3))
+                      (-dict-compound-min-length dict)
+                    3))
          (len (length word)))
     (and (>= (- len start-pos) (* 2 min-len))
          (-dolist-until (i (number-sequence (+ start-pos min-len) (- len min-len)))
@@ -854,7 +934,7 @@ most recent first."
                                     (not (and (/= 0 (-dict-compound-force-uppercase dict))
                                               (not allow-bad-forceucase)
                                               (-flags-contain (cdr part2-entry)
-                                                               (-dict-compound-force-uppercase dict))))
+                                                              (-dict-compound-force-uppercase dict))))
                                     part1-entry)))
                         (-check-compound-with-rules dict word words-data1 i allow-bad-forceucase)))))))))
 
@@ -959,7 +1039,7 @@ entirely."
         (found (string-search "ss" base pos)))
     (if (and found (< n max-sharps))
         (or (let ((replaced (concat (substring base 0 found) "ß"
-                                     (substring base (+ found 2)))))
+                                    (substring base (+ found 2)))))
               (-spell-sharps dict replaced (1+ found) (1+ n) (1+ rep)))
             (-spell-sharps dict base (+ found 2) (1+ n) rep))
       (and (> rep 0)
@@ -972,8 +1052,8 @@ entirely."
     (if res
         (let ((flags (cdr res)))
           (not (or (-flags-contain flags (-dict-forbiddenword-flag dict))
-                    (and (-dict-forbid-warn dict)
-                         (-flags-contain flags (-dict-warn-flag dict))))))
+                   (and (-dict-forbid-warn dict)
+                        (-flags-contain flags (-dict-warn-flag dict))))))
       (and (/= depth 9)
            (or (-dolist-until (pat (-dict-break-start dict))
                  (and (string-prefix-p pat s)
@@ -1026,6 +1106,7 @@ entirely."
     i))
 
 (defun -spell (dict word)
+  (setq word (-substr-replace (-dict-input-iconv dict) word))
   (if (string-empty-p word)
       t
     (let ((abbreviation (eq (aref word (1- (length word))) ?.)))
@@ -1041,6 +1122,773 @@ entirely."
               (if (and (not ret) abbreviation)
                   (-spell-break dict (concat word ".") 0)
                 ret))))))))
+
+;;;; Suggestions
+;;
+;; This is a port of Nuspell's `Suggester', which builds a list of
+;; candidate corrections by running many small, independent "one
+;; typo" heuristics (`-suggest-low' and its callees) plus a slower
+;; dictionary-wide n-gram similarity search (`-ngram-suggest'), then
+;; cleans up and reorders the result.  Nuspell's version operates on
+;; UTF-8 byte offsets because C++ strings are byte sequences; Emacs
+;; strings are already sequences of characters, so this port indexes
+;; by character throughout and has no equivalent of Nuspell's
+;; UTF-8-boundary bookkeeping.  Likewise, affixing/stripping here
+;; builds fresh strings with `substring'/`concat' instead of mutating
+;; a buffer in place and reverting it afterwards, since Emacs strings
+;; are not mutated in length the way C++ strings are; this is simpler
+;; at the cost of some allocation, which is acceptable since
+;; suggestions, unlike checking, are not expected to run in a tight
+;; loop.
+
+;;;; Suggestion accumulator
+
+(cl-defstruct (-sugs-box (:constructor -sugs-box-create))
+  "Mutable suggestion list, built up by the various `-*-suggest' functions.
+Mirrors passing a `List_Strings&' around in Nuspell; HEAD/TAIL support
+O(1) `-sugs-push' (appending, the common case), and COUNT is kept in
+sync so callers do not need to walk the list to learn its length."
+  head tail (count 0))
+
+(defun -sugs-push (box word)
+  "Append WORD to the end of BOX's suggestion list."
+  (let ((cell (cons word nil)))
+    (if (-sugs-box-tail box)
+        (setcdr (-sugs-box-tail box) cell)
+      (setf (-sugs-box-head box) cell))
+    (setf (-sugs-box-tail box) cell))
+  (incf (-sugs-box-count box)))
+
+(defun -sugs-push-first (box word)
+  "Prepend WORD to BOX's suggestion list."
+  (let ((cell (cons word (-sugs-box-head box))))
+    (setf (-sugs-box-head box) cell)
+    (unless (-sugs-box-tail box)
+      (setf (-sugs-box-tail box) cell)))
+  (incf (-sugs-box-count box)))
+
+(defun -sugs-list (box)
+  "Return BOX's current suggestion list, in order."
+  (-sugs-box-head box))
+
+(defun -sugs-box-set (box list)
+  "Replace BOX's suggestion list wholesale with LIST."
+  (setf (-sugs-box-head box) list)
+  (setf (-sugs-box-tail box) (last list))
+  (setf (-sugs-box-count box) (length list)))
+
+(defun -add-sug-if-correct (dict word box)
+  "Push WORD onto BOX if it is a correct, suggestible word of DICT.
+Return non-nil iff it was pushed.  Mirrors Nuspell's
+`Suggester::add_sug_if_correct'."
+  (let ((res (-check-word dict word nil t)))
+    (and res
+         (not (-flags-contain (cdr res) (-dict-forbiddenword-flag dict)))
+         (not (and (-dict-forbid-warn dict) (-flags-contain (cdr res) (-dict-warn-flag dict))))
+         (progn (-sugs-push box word) t))))
+
+;;;; Attempt budget, for the algorithms below that are otherwise O(word
+;;;; length * affix table size) or worse
+
+(cl-defstruct (-budget (:constructor -budget-create (n)))
+  "A shared, mutable count of remaining suggestion attempts."
+  n)
+
+(defun -budget-consume (budget)
+  "Consume one unit of BUDGET; return non-nil if one was available."
+  (when (> (-budget-n budget) 0)
+    (decf (-budget-n budget))
+    t))
+
+(defun -max-attempts-for-long-algos (dict word)
+  "Return DICT's suggestion-attempt budget for WORD.
+A heuristic cap, based on the size of DICT's affix tables, on how many
+candidates the pricier per-position suggestion heuristics below may
+try; without it, a dictionary with unusually many affixes could make
+suggesting take an impractically long time.  Mirrors Nuspell's
+`Suggester::max_attempts_for_long_alogs'.  Unlike Nuspell, there is no
+COMPLEXPREFIXES branch, since `vibe-spell-create' already rejects such
+dictionaries; see the Commentary at the top of this file."
+  (let* ((p (/ (length (-dict-prefix-table dict)) 20))
+         (s (/ (length (-dict-suffix-table dict)) 20))
+         (cost (+ 1 p s (* p s) (* s s) (* 2 p s s)))
+         (cost (max 250000 (min cost 25000000000)))
+         (ret (/ 25000000000 cost)))
+    (if (and (or (/= 0 (-dict-compound-flag dict))
+                 (/= 0 (-dict-compound-begin-flag dict))
+                 (/= 0 (-dict-compound-last-flag dict))
+                 (/= 0 (-dict-compound-middle-flag dict)))
+             (> (length word) 0))
+        (/ ret (length word))
+      ret)))
+
+;;;; Small string-surgery helpers shared by the heuristics below
+
+(defun -replace-char-at (word i rep)
+  "Return WORD with its character at index I replaced by string REP."
+  (concat (substring word 0 i) rep (substring word (1+ i))))
+
+(defun -swap-adjacent (word i)
+  "Return WORD with the characters at indices I and I+1 swapped."
+  (concat (substring word 0 i)
+          (substring word (1+ i) (+ i 2))
+          (substring word i (1+ i))
+          (substring word (+ i 2))))
+
+(defun -swap-chars (word i j)
+  "Return WORD with the characters at indices I and J (I < J) swapped."
+  (concat (substring word 0 i)
+          (substring word j (1+ j))
+          (substring word (1+ i) j)
+          (substring word i (1+ i))
+          (substring word (1+ j))))
+
+(defun -swap-two-pairs (word i j)
+  "Return WORD with (I . I+1) and (J . J+1) each swapped (I+2 <= J)."
+  (concat (substring word 0 i)
+          (substring word (1+ i) (+ i 2))
+          (substring word i (1+ i))
+          (substring word (+ i 2) j)
+          (substring word (1+ j) (+ j 2))
+          (substring word j (1+ j))
+          (substring word (+ j 2))))
+
+(defun -move-char-forward (word i j)
+  "Return WORD with the character at index I moved to just after J (J > I)."
+  (concat (substring word 0 i)
+          (substring word (1+ i) (1+ j))
+          (substring word i (1+ i))
+          (substring word (1+ j))))
+
+(defun -move-char-backward (word i j)
+  "Return WORD with the character at index I moved to index J (J < I)."
+  (concat (substring word 0 j)
+          (substring word i (1+ i))
+          (substring word j i)
+          (substring word (1+ i))))
+
+(defun -to-title-char-at (s i)
+  "Return S with its character at index I upcased; the rest is unchanged."
+  (concat (substring s 0 i) (string (upcase (aref s i))) (substring s (1+ i))))
+
+;;;; Single-typo suggestion heuristics
+;;
+;; Each of these mirrors one of Nuspell's `Suggester::*_suggest'
+;; member functions: given WORD (assumed already a correctly-cased
+;; input, or lower-cased by the caller) and BOX, it tries variations
+;; of WORD that correct one commonly-made kind of typing mistake, and
+;; pushes each one that turns out to be a correctly spelled word of
+;; DICT onto BOX via `-add-sug-if-correct'.
+
+(defun -uppercase-suggest (dict word box)
+  (-add-sug-if-correct dict (upcase word) box))
+
+(defun -try-rep-suggestion (dict candidate box)
+  "Push CANDIDATE onto BOX if correct, or if every space-separated part is.
+Mirrors Nuspell's `Suggester::try_rep_suggestion'."
+  (unless (-add-sug-if-correct dict candidate box)
+    (when (and (string-search " " candidate)
+               (all (lambda (part) (-check-word dict part nil t))
+                    (split-string candidate " " t)))
+      (-sugs-push box candidate))))
+
+(defun -rep-suggest (dict word box)
+  "Try DICT's REP-table replacements (whole-word, prefix, suffix, any-place).
+Mirrors Nuspell's `Suggester::rep_suggest'."
+  (dolist (r (-dict-rep-whole dict))
+    (when (string= word (car r))
+      (-try-rep-suggestion dict (cdr r) box)))
+  (dolist (r (-dict-rep-start dict))
+    (when (string-prefix-p (car r) word)
+      (-try-rep-suggestion dict (concat (cdr r) (substring word (length (car r)))) box)))
+  (dolist (r (-dict-rep-end dict))
+    (when (string-suffix-p (car r) word)
+      (-try-rep-suggestion
+       dict (concat (substring word 0 (- (length word) (length (car r)))) (cdr r)) box)))
+  (dolist (r (-dict-rep-any dict))
+    (let* ((from (car r))
+           (to (cdr r))
+           (i (and (not (string-empty-p from)) (string-search from word))))
+      (while i
+        (-try-rep-suggestion
+         dict (concat (substring word 0 i) to (substring word (+ i (length from)))) box)
+        (setq i (string-search from word (1+ i)))))))
+
+(defun -map-suggest-try (dict word box i old-len rep budget)
+  "Replace WORD[I, I+OLD-LEN) with REP, as one `-map-suggest' attempt."
+  (when (-budget-consume budget)
+    (let ((candidate (concat (substring word 0 i) rep (substring word (+ i old-len)))))
+      (-add-sug-if-correct dict candidate box)
+      (-map-suggest-1 dict candidate box (+ i (length rep)) budget))))
+
+(defun -map-suggest-try-group (dict word box i budget grp)
+  "Try GRP's character/string equivalences at WORD's position I.
+See `-map-suggest-1'."
+  (let* ((chars (-similarity-group-chars grp))
+         (strings (-similarity-group-strings grp))
+         (cp (aref word i))
+         (j (cl-position cp chars)))
+    (when j
+      (dotimes (k (length chars))
+        (unless (= k j)
+          (-map-suggest-try dict word box i 1 (substring chars k (1+ k)) budget)))
+      (dolist (r strings)
+        (-map-suggest-try dict word box i 1 r budget)))
+    (dolist (f strings)
+      (when (and (<= (+ i (length f)) (length word))
+                 (string= f (substring word i (+ i (length f)))))
+        (dotimes (k (length chars))
+          (-map-suggest-try dict word box i (length f) (substring chars k (1+ k)) budget))
+        (dolist (r strings)
+          (unless (string= r f)
+            (-map-suggest-try dict word box i (length f) r budget)))))))
+
+(defun -map-suggest-1 (dict word box i budget)
+  "Try MAP (similarity-group) substitutions in WORD from index I onward."
+  (when (and (< i (length word)) (> (-budget-n budget) 0))
+    (dolist (grp (-dict-similarities dict))
+      (-map-suggest-try-group dict word box i budget grp))
+    (-map-suggest-1 dict word box (1+ i) budget)))
+
+(defun -map-suggest (dict word box)
+  "Try DICT's MAP character/string equivalences throughout WORD.
+Mirrors Nuspell's `Suggester::map_suggest'."
+  (-map-suggest-1 dict word box 0 (-budget-create (-max-attempts-for-long-algos dict word))))
+
+(defun -adjacent-swap-suggest (dict word box)
+  "Try swapping each pair of adjacent characters of WORD.
+For 4- and 5-character words, also try the two-simultaneous-swap
+combinations Nuspell additionally tries.  Mirrors Nuspell's
+`Suggester::adjacent_swap_suggest'."
+  (let ((len (length word)))
+    (when (> len 0)
+      (dotimes (i (1- len))
+        (-add-sug-if-correct dict (-swap-adjacent word i) box))
+      (pcase len
+        (4 (-add-sug-if-correct dict (-swap-two-pairs word 0 2) box))
+        (5 (-add-sug-if-correct dict (-swap-two-pairs word 0 3) box)
+           (-add-sug-if-correct dict (-swap-two-pairs word 1 3) box))))))
+
+(defun -distant-swap-suggest (dict word box)
+  "Try swapping each pair of non-adjacent characters of WORD.
+Mirrors Nuspell's `Suggester::distant_swap_suggest'."
+  (let ((len (length word)))
+    (when (> len 0)
+      (let ((budget (-budget-create (-max-attempts-for-long-algos dict word))))
+        (dotimes (i len)
+          (dotimes (k (max 0 (- len i 2)))
+            (when (-budget-consume budget)
+              (-add-sug-if-correct dict (-swap-chars word i (+ i 2 k)) box))))))))
+
+(defun -keyboard-suggest (dict word box)
+  "Try case-toggling and keyboard-adjacent-key replacements in WORD.
+DICT's KEY (keyboard closeness) groups are \"|\"-separated runs of
+characters that are physically close together; this tries, for each
+character of WORD, replacing it with its upper case, and with its
+neighbors (if any) in every KEY group it belongs to.  Mirrors
+Nuspell's `Suggester::keyboard_suggest'."
+  (let ((kb (-dict-keyboard-closeness dict)))
+    (dotimes (j (length word))
+      (let* ((c (aref word j)) (upp (upcase c)))
+        (when (/= upp c)
+          (-add-sug-if-correct dict (-replace-char-at word j (string upp)) box))
+        (dotimes (i (length kb))
+          (when (eq (aref kb i) c)
+            (when (and (> i 0) (/= (aref kb (1- i)) ?|))
+              (-add-sug-if-correct dict (-replace-char-at word j (substring kb (1- i) i)) box))
+            (when (and (< (1+ i) (length kb)) (/= (aref kb (1+ i)) ?|))
+              (-add-sug-if-correct
+               dict (-replace-char-at word j (substring kb (1+ i) (+ i 2))) box))))))))
+
+(defun -extra-char-suggest (dict word box)
+  "Try removing each single character of WORD.
+Mirrors Nuspell's `Suggester::extra_char_suggest'."
+  (dotimes (i (length word))
+    (-add-sug-if-correct dict (concat (substring word 0 i) (substring word (1+ i))) box)))
+
+(defun -forgotten-char-suggest (dict word box)
+  "Try inserting each of DICT's TRY characters at each position of WORD.
+Mirrors Nuspell's `Suggester::forgotten_char_suggest'."
+  (let ((budget (-budget-create (-max-attempts-for-long-algos dict word)))
+        (try-chars (-dict-try-chars dict)))
+    (dotimes (t-idx (length try-chars))
+      (let ((cp (substring try-chars t-idx (1+ t-idx))))
+        (dotimes (i (1+ (length word)))
+          (when (-budget-consume budget)
+            (-add-sug-if-correct
+             dict (concat (substring word 0 i) cp (substring word i)) box)))))))
+
+(defun -move-char-suggest (dict word box)
+  "Try moving each character of WORD to each other, non-adjacent position.
+Mirrors Nuspell's `Suggester::move_char_suggest'."
+  (let* ((len (length word))
+         (budget (-budget-create (-max-attempts-for-long-algos dict word))))
+    (dotimes (i1 len)
+      (dotimes (k (max 0 (- len i1 2)))
+        (when (-budget-consume budget)
+          (-add-sug-if-correct dict (-move-char-forward word i1 (+ i1 2 k)) box))))
+    (dotimes (i1 len)
+      (dotimes (k (max 0 (- i1 2)))
+        (when (-budget-consume budget)
+          (-add-sug-if-correct dict (-move-char-backward word i1 (- i1 2 k)) box))))))
+
+(defun -bad-char-suggest (dict word box)
+  "Try replacing each character of WORD with each of DICT's TRY characters.
+Mirrors Nuspell's `Suggester::bad_char_suggest'."
+  (let ((budget (-budget-create (-max-attempts-for-long-algos dict word)))
+        (try-chars (-dict-try-chars dict)))
+    (dotimes (t-idx (length try-chars))
+      (let ((tc (aref try-chars t-idx)))
+        (dotimes (i (length word))
+          (unless (eq (aref word i) tc)
+            (when (-budget-consume budget)
+              (-add-sug-if-correct dict (-replace-char-at word i (string tc)) box))))))))
+
+(defun -doubled-two-chars-suggest (dict word box)
+  "Try collapsing an \"XYXYX\" run in WORD down to \"XYX\".
+Mirrors Nuspell's `Suggester::doubled_two_chars_suggest'."
+  (let ((len (length word)))
+    (dotimes (i (max 0 (- len 4)))
+      (when (and (eq (aref word i) (aref word (+ i 2)))
+                 (eq (aref word (1+ i)) (aref word (+ i 3)))
+                 (eq (aref word i) (aref word (+ i 4))))
+        (-add-sug-if-correct
+         dict (concat (substring word 0 (+ i 3)) (substring word (+ i 5))) box)))))
+
+(defun -two-words-suggest (dict word box)
+  "Try splitting WORD into two dictionary words, space- or hyphen-joined.
+Mirrors Nuspell's `Suggester::two_words_suggest'."
+  (let ((len (length word)) (try-chars (-dict-try-chars dict)))
+    (dotimes (i (max 0 (1- len)))
+      (let ((w1 (substring word 0 (1+ i))) (w2 (substring word (1+ i))))
+        (when (and (-check-simple-word dict w1 t) (-check-simple-word dict w2 t))
+          (let ((candidate (concat w1 " " w2)))
+            (unless (member candidate (-sugs-list box))
+              (-sugs-push box candidate)))
+          (when (and (> (1+ i) 1) (> (length w2) 1)
+                     (or (cl-position ?a try-chars) (cl-position ?- try-chars)))
+            (let ((candidate (concat w1 "-" w2)))
+              (unless (member candidate (-sugs-list box))
+                (-sugs-push box candidate)))))))))
+
+(defun -suggest-low (dict word box)
+  "Try every single-typo heuristic above for WORD, pushing hits onto BOX.
+Return non-nil if a \"high quality\" suggestion was found this way, in
+which case the caller may skip the much more expensive
+`-ngram-suggest'.  Mirrors Nuspell's `Suggester::suggest_low'."
+  (let ((old-count (-sugs-box-count box)))
+    (-uppercase-suggest dict word box)
+    (-rep-suggest dict word box)
+    (-map-suggest dict word box)
+    (let ((hq (or (/= old-count (-sugs-box-count box))
+                  (and (-dict-similarities dict) (-check-word dict word nil t) t))))
+      (-adjacent-swap-suggest dict word box)
+      (-distant-swap-suggest dict word box)
+      (-keyboard-suggest dict word box)
+      (-extra-char-suggest dict word box)
+      (-forgotten-char-suggest dict word box)
+      (-move-char-suggest dict word box)
+      (-bad-char-suggest dict word box)
+      (-doubled-two-chars-suggest dict word box)
+      (-two-words-suggest dict word box)
+      hq)))
+
+;;;; N-gram-based suggestion search
+;;
+;; When none of the heuristics above finds a "high quality" match,
+;; `-ngram-suggest' instead scores every word of the dictionary by how
+;; similar it looks to the misspelled word (by shared substrings and
+;; letters in matching positions, roughly), keeps the 100 best-scoring
+;; roots, expands each of those through its possible affixes, scores
+;; those expansions too, and returns the best-scoring ones.  This is
+;; much more expensive than the heuristics above (it visits every
+;; dictionary word) but catches corrections that are not just one
+;; small edit away from the misspelling.  Mirrors Nuspell's
+;; `Suggester::ngram_suggest' and the free functions above it.
+
+(defconst -max-suggestions 16
+  "Hard cap on the number of suggestions `-ngram-suggest' may add.
+Mirrors Nuspell's `Aff_Data::MAX_SUGGESTIONS'.")
+
+(defun -ngram-similarity-low-level (n a b)
+  "Return a raw k-gram-overlap similarity score of A against B, k=1..N.
+Mirrors Nuspell's `ngram_similarity_low_level'."
+  (let ((n (min n (length a))) (score 0))
+    (-dolist-until (k (number-sequence 1 n))
+      (let ((k-score 0))
+        (dotimes (i (1+ (- (length a) k)))
+          (when (string-search (substring a i (+ i k)) b)
+            (setq k-score (1+ k-score))))
+        (setq score (+ score k-score))
+        (< k-score 2)))
+    score))
+
+(defun -ngram-similarity-weighted-low-level (n a b)
+  "Like `-ngram-similarity-low-level', but penalizing non-matching k-grams.
+Mirrors Nuspell's `ngram_similarity_weighted_low_level'."
+  (let ((n (min n (length a))) (score 0))
+    (dolist (k (number-sequence 1 n))
+      (let ((k-score 0))
+        (dotimes (i (1+ (- (length a) k)))
+          (if (string-search (substring a i (+ i k)) b)
+              (setq k-score (1+ k-score))
+            (setq k-score (1- k-score))
+            (when (or (= i 0) (= i (- (length a) k)))
+              (setq k-score (1- k-score)))))
+        (setq score (+ score k-score))))
+    score))
+
+(defun -ngram-similarity-longer-worse (n a b)
+  "`-ngram-similarity-low-level', penalized when B is much longer than A.
+Mirrors Nuspell's `ngram_similarity_longer_worse'."
+  (if (string-empty-p b)
+      0
+    (let ((score (-ngram-similarity-low-level n a b))
+          (d (- (- (length b) (length a)) 2)))
+      (if (> d 0) (- score d) score))))
+
+(defun -ngram-similarity-any-mismatch (n a b)
+  "`-ngram-similarity-low-level', penalized when A and B differ much in length.
+Mirrors Nuspell's `ngram_similarity_any_mismatch'."
+  (if (string-empty-p b)
+      0
+    (let ((score (-ngram-similarity-low-level n a b))
+          (d (- (abs (- (length b) (length a))) 2)))
+      (if (> d 0) (- score d) score))))
+
+(defun -ngram-similarity-any-mismatch-weighted (n a b)
+  "Weighted version of `-ngram-similarity-any-mismatch'.
+Mirrors Nuspell's `ngram_similarity_any_mismatch_weighted'."
+  (if (string-empty-p b)
+      0
+    (let ((score (-ngram-similarity-weighted-low-level n a b))
+          (d (- (abs (- (length b) (length a))) 2)))
+      (if (> d 0) (- score d) score))))
+
+(defun -left-common-substring-length (a b)
+  "Return the length of A and B's common prefix.
+The first character is matched case-insensitively; the rest are not.
+Mirrors Nuspell's `left_common_substring_length'."
+  (if (or (string-empty-p a) (string-empty-p b))
+      0
+    (if (and (/= (aref a 0) (aref b 0)) (/= (aref a 0) (downcase (aref b 0))))
+        0
+      (let ((n (min (length a) (length b))) (i 1))
+        (while (and (< i n) (eq (aref a i) (aref b i)))
+          (setq i (1+ i)))
+        i))))
+
+(defun -longest-common-subsequence-length (a b)
+  "Return the length of the longest common subsequence of A and B.
+Mirrors Nuspell's `longest_common_subsequence_length'."
+  (let ((state (make-vector (max (length b) 1) 0)))
+    (dotimes (i (length a))
+      (let ((row1-prev 0) (row2-prev 0))
+        (dotimes (j (length b))
+          (let ((row1-current (aref state j)))
+            (if (eq (aref a i) (aref b j))
+                (aset state j (1+ row1-prev))
+              (aset state j (max row1-current row2-prev)))
+            (setq row1-prev row1-current)
+            (setq row2-prev (aref state j))))))
+    (if (zerop (length b)) 0 (aref state (1- (length b))))))
+
+(defun -count-eq-chars-at-same-pos (a b)
+  "Return (NUM . IS-SWAP) for A and B; see Nuspell's `count_eq_chars_at_same_pos'.
+NUM is how many characters are equal at the same position in both; when
+A and B are the same length and exactly 2 positions differ, IS-SWAP
+says whether those two differing characters are a transposition of
+each other."
+  (let* ((n (min (length a) (length b))) (count 0))
+    (dotimes (i n)
+      (when (eq (aref a i) (aref b i)) (setq count (1+ count))))
+    (let (is-swap m1 m2)
+      (when (and (= (length a) (length b)) (= (- n count) 2))
+        (-dolist-until (i (number-sequence 0 (1- n)))
+          (unless (eq (aref a i) (aref b i))
+            (if m1 (progn (setq m2 i) t) (progn (setq m1 i) nil))))
+        (setq is-swap (and (eq (aref a m1) (aref b m2)) (eq (aref a m2) (aref b m1)))))
+      (cons count is-swap))))
+
+(defun -expand-root-word-for-ngram (dict root flags wrong)
+  "Return every word form derivable from ROOT/FLAGS, for `-ngram-suggest'.
+WRONG is the original (lower-cased) misspelled word; affixes whose
+appending text is absent from it are skipped, as a pruning
+optimization only.  Mirrors Nuspell's
+`Suggester::expand_root_word_for_ngram'."
+  (let ((base (unless (-flags-contain flags (-dict-need-affix-flag dict)) (list root)))
+        suffixed cross-ok combo prefixed)
+    (when flags
+      (dolist (sfx (-all-affix-table-entries (-dict-suffix-table dict)))
+        (when (and (-cross-valid-p flags (-suffix-flag sfx))
+                   (not (-outer-suffix-not-valid-p dict :full-word sfx))
+                   (not (-circumfix-flags-p dict (-suffix-cont-flags sfx)))
+                   (string-suffix-p (-suffix-stripping sfx) root)
+                   (-suffix-check-condition sfx root)
+                   (or (string-empty-p (-suffix-appending sfx))
+                       (string-suffix-p (-suffix-appending sfx) wrong)))
+          (push (-suffix-from-root sfx root) suffixed)
+          (push (-suffix-cross-product sfx) cross-ok)))
+      (setq suffixed (nreverse suffixed) cross-ok (nreverse cross-ok))
+      (cl-mapc
+       (lambda (root-sfx ok)
+         (when ok
+           (dolist (pfx (-all-affix-table-entries (-dict-prefix-table dict)))
+             (when (and (-cross-valid-p flags (-prefix-flag pfx))
+                        (not (-outer-prefix-not-valid-p dict :full-word pfx))
+                        (not (-circumfix-flags-p dict (-prefix-cont-flags pfx)))
+                        (string-prefix-p (-prefix-stripping pfx) root-sfx)
+                        (-prefix-check-condition pfx root-sfx)
+                        (or (string-empty-p (-prefix-appending pfx))
+                            (string-prefix-p (-prefix-appending pfx) wrong)))
+               (push (-prefix-from-root pfx root-sfx) combo)))))
+       suffixed cross-ok)
+      (dolist (pfx (-all-affix-table-entries (-dict-prefix-table dict)))
+        (when (and (-cross-valid-p flags (-prefix-flag pfx))
+                   (not (-outer-prefix-not-valid-p dict :full-word pfx))
+                   (not (-circumfix-flags-p dict (-prefix-cont-flags pfx)))
+                   (string-prefix-p (-prefix-stripping pfx) root)
+                   (-prefix-check-condition pfx root)
+                   (or (string-empty-p (-prefix-appending pfx))
+                       (string-prefix-p (-prefix-appending pfx) wrong)))
+          (push (-prefix-from-root pfx root) prefixed))))
+    (append base suffixed combo prefixed)))
+
+(defun -ngram-select-top (candidates limit)
+  "Return the LIMIT highest-scoring entries of CANDIDATES, a list of
+\(SCORE . VALUE), sorted by descending score."
+  (take limit (sort candidates (lambda (a b) (> (car a) (car b))))))
+
+(defun -ngram-suggest (dict wrong-word box)
+  "Add n-gram-similarity-based suggestions for WRONG-WORD to BOX.
+WRONG-WORD is assumed already lower-cased.  Mirrors Nuspell's
+`Suggester::ngram_suggest'."
+  (let (roots)
+    (maphash
+     (lambda (word flags-list)
+       (dolist (flags flags-list)
+         (unless (or (-flags-contain flags (-dict-forbiddenword-flag dict))
+                     (-hidden-homonym-p flags)
+                     (-flags-contain flags (-dict-nosuggest-flag dict))
+                     (-flags-contain flags (-dict-compound-onlyin-flag dict)))
+           (let ((score (+ (-left-common-substring-length wrong-word word)
+                           (-ngram-similarity-longer-worse 3 wrong-word (downcase word)))))
+             (push (list score word flags) roots)))))
+     (-dict-words dict))
+    (setq roots (-ngram-select-top roots 100))
+
+    (let ((threshold 0))
+      (dolist (k '(1 2 3))
+        (let ((mangled wrong-word) (i k))
+          (while (< i (length mangled))
+            ;; Can't `aset' an arbitrary character in place: Emacs
+            ;; strings are not necessarily uniform-width internally,
+            ;; so replacing e.g. a 2-byte-wide character with a
+            ;; 1-byte-wide "*" can fail; rebuild instead.
+            (setq mangled (concat (substring mangled 0 i) "*" (substring mangled (1+ i))))
+            (setq i (+ i 4)))
+          (setq threshold (+ threshold
+                             (-ngram-similarity-any-mismatch
+                              (length wrong-word) wrong-word mangled)))))
+      (setq threshold (/ threshold 3))
+
+      (let (guesses)
+        (dolist (r roots)
+          (pcase-let ((`(,_ ,word ,flags) r))
+            (dolist (expanded (-expand-root-word-for-ngram dict word flags wrong-word))
+              (let* ((lower (downcase expanded))
+                     (score (+ (-left-common-substring-length wrong-word expanded)
+                               (-ngram-similarity-any-mismatch
+                                (length wrong-word) wrong-word lower))))
+                (when (>= score threshold)
+                  (push (cons score expanded) guesses))))))
+        (setq guesses (-ngram-select-top guesses 200))
+
+        (-dolist-until (g guesses)
+          (pcase-let ((`(,score . ,word) g))
+            (let* ((lower (downcase word))
+                   (lcs (-longest-common-subsequence-length wrong-word lower)))
+              (if (and (= (length wrong-word) (length lower))
+                       (= (length wrong-word) lcs))
+                  (progn (setcar g (+ score 2000)) t)
+                (let* ((ngram2 (+ (-ngram-similarity-any-mismatch-weighted 2 wrong-word lower)
+                                  (-ngram-similarity-any-mismatch-weighted 2 lower wrong-word)))
+                       (ngram4 (-ngram-similarity-any-mismatch 4 wrong-word lower))
+                       (left-common (-left-common-substring-length wrong-word lower))
+                       (eq-info (-count-eq-chars-at-same-pos wrong-word lower))
+                       (new-score (- (* 2 lcs) (abs (- (length wrong-word) (length lower))))))
+                  (setq new-score (+ new-score left-common ngram2 ngram4))
+                  (when (/= (car eq-info) 0) (setq new-score (1+ new-score)))
+                  (when (cdr eq-info) (setq new-score (+ new-score 10)))
+                  (when (< (* 5 ngram2)
+                           (* (+ (length wrong-word) (length lower))
+                              (- 10 (-dict-max-diff-factor dict))))
+                    (setq new-score (- new-score 1000)))
+                  (setcar g new-score)
+                  nil)))))
+        (setq guesses (sort guesses (lambda (a b) (> (car a) (car b)))))
+
+        (let* ((more-selective (and guesses (> (car (car guesses)) 1000)))
+               (old-num-sugs (-sugs-box-count box))
+               (max-sug (min -max-suggestions (+ old-num-sugs (-dict-max-ngram-suggestions dict)))))
+          (-dolist-until (g guesses)
+            (pcase-let ((`(,score . ,word) g))
+              (cond
+               ((= (-sugs-box-count box) max-sug) t)
+               ((and more-selective (<= score 1000)) t)
+               ((and (< score -100)
+                     (or (/= old-num-sugs (-sugs-box-count box)) (-dict-only-max-diff dict)))
+                t)
+               ((any (lambda (sug) (string-search sug word)) (-sugs-list box))
+                (< score -100))
+               (t (-sugs-push box word) nil)))))))))
+
+;;;; Top-level suggestion entry point
+
+(defun -fix-space-casing-in-sugs (box word)
+  "Title-case the second word of BOX's space-containing suggestions.
+Any suggestion of BOX that contains a space and whose part after that
+space does not already end in the same case as WORD has that part's
+first character upcased, and is moved to the front of BOX.  Used for
+CAMEL/PASCAL-cased input.  Loosely mirrors the casing-fix loop in
+Nuspell's `Suggester::suggest_priv' (ties among several qualifying
+suggestions are broken differently; see the Commentary at the top of
+this file)."
+  (let (fixed rest)
+    (dolist (sug (-sugs-list box))
+      (let ((space (string-search " " sug)))
+        (if (not space)
+            (push sug rest)
+          (let* ((i (1+ space)) (len (- (length sug) i)))
+            (if (and (<= len (length word))
+                     (string= (substring sug i) (substring word (- (length word) len))))
+                (push sug rest)
+              (push (concat (substring sug 0 i) (-to-title-char-at (substring sug i) 0))
+                    fixed))))))
+    (-sugs-box-set box (append (nreverse fixed) (nreverse rest)))))
+
+(defun -fix-keepcase-sug (dict s)
+  "Return S, possibly lower- or title-cased, or nil to drop it.
+Used for INIT_CAPITAL/ALL_CAPITAL input to a KEEPCASE/FORBIDDENWORD
+dictionary.  Mirrors the inline `is_ok' lambda in Nuspell's
+`Suggester::suggest_priv'."
+  (cond
+   ((string-search " " s) s)
+   ((-spell dict s) s)
+   ((-spell dict (downcase s)) (downcase s))
+   (t (let ((title (-to-title s))) (and (-spell dict title) title)))))
+
+(defun -dedup-preserve-first (list)
+  "Return LIST with duplicates removed, keeping each value's first occurrence."
+  (let (seen result)
+    (dolist (s list)
+      (unless (member s seen)
+        (push s seen)
+        (push s result)))
+    (nreverse result)))
+
+(defun -suggest-dash-split (dict box word)
+  "If WORD contains a hyphen, also try correcting it piece by piece.
+For each \"-\"-separated piece of WORD that is not itself a correctly
+spelled word, recursively suggest corrections for that piece alone and
+splice each one into WORD in its place, pushing the result onto BOX
+unless it is a forbidden word.  Skipped entirely if BOX already has a
+suggestion containing a hyphen.  Mirrors the dash-splitting block in
+Nuspell's `Suggester::suggest_priv'."
+  (when (and (string-search "-" word)
+             (not (any (lambda (s) (string-search "-" s)) (-sugs-list box))))
+    (let ((i 0) (len (length word)))
+      (while (<= i len)
+        (let* ((dash (string-search "-" word i))
+               (j (or dash len))
+               (part (substring word i j)))
+          (unless (-spell dict part)
+            (dolist (sub (-suggest-priv dict part))
+              (let* ((candidate (concat (substring word 0 i) sub (substring word j)))
+                     (flg (-check-word dict candidate)))
+                (when (or (not flg) (not (-flags-contain (cdr flg) (-dict-forbiddenword-flag dict))))
+                  (-sugs-push box candidate)))))
+          (setq i (if dash (1+ j) (1+ len))))))))
+
+(defun -suggest-for-casing (dict word casing)
+  "Return suggestions for WORD, dispatching on its CASING.
+Called from `-suggest-priv' once WORD has had any trailing abbreviation
+dots trimmed and its early-exit special case ruled out; CASING is
+`-classify-casing' of WORD."
+  (let ((box (-sugs-box-create)) (hq-sugs nil))
+    (pcase casing
+      ('small
+       (setq hq-sugs (-suggest-low dict word box)))
+      ('init-capital
+       (setq hq-sugs (-suggest-low dict word box))
+       (setq hq-sugs (or (-suggest-low dict (downcase word) box) hq-sugs)))
+      ((or 'camel 'pascal)
+       (setq hq-sugs (-suggest-low dict word box))
+       (let ((dot (string-search "." word)))
+         (when dot
+           (let ((after (substring word (1+ dot))))
+             (when (eq (-classify-casing after) 'init-capital)
+               (-sugs-push-first box (concat (substring word 0 (1+ dot)) " " after))))))
+       (when (eq casing 'pascal)
+         (let ((buffer (concat (downcase (substring word 0 1)) (substring word 1))))
+           (when (-spell dict buffer) (-sugs-push-first box buffer))
+           (setq hq-sugs (or (-suggest-low dict buffer box) hq-sugs))))
+       (let ((lower (downcase word)))
+         (when (-spell dict lower) (-sugs-push-first box lower))
+         (setq hq-sugs (or (-suggest-low dict lower box) hq-sugs)))
+       (when (eq casing 'pascal)
+         (let ((title (-to-title word)))
+           (when (-spell dict title) (-sugs-push-first box title))
+           (setq hq-sugs (or (-suggest-low dict title box) hq-sugs))))
+       (-fix-space-casing-in-sugs box word))
+      ('all-capital
+       (let ((lower (downcase word)))
+         (when (and (/= 0 (-dict-keepcase-flag dict)) (-spell dict lower))
+           (-sugs-push-first box lower))
+         (setq hq-sugs (-suggest-low dict lower box)))
+       (let ((title (-to-title word)))
+         (setq hq-sugs (or (-suggest-low dict title box) hq-sugs)))
+       (-sugs-box-set box (mapcar #'upcase (-sugs-list box)))))
+
+    (when (and (not hq-sugs) (/= 0 (-dict-max-ngram-suggestions dict)))
+      (let* ((buffer (if (eq casing 'small) word (downcase word)))
+             (old-list (-sugs-list box))
+             (old-len (length old-list)))
+        (-ngram-suggest dict buffer box)
+        (when (eq casing 'all-capital)
+          (-sugs-box-set
+           box (append old-list (mapcar #'upcase (nthcdr old-len (-sugs-list box))))))))
+
+    (-suggest-dash-split dict box word)
+
+    (when (memq casing '(init-capital pascal))
+      (-sugs-box-set box (mapcar (lambda (s) (-to-title-char-at s 0)) (-sugs-list box))))
+
+    (when (and (memq casing '(init-capital all-capital))
+               (or (/= 0 (-dict-keepcase-flag dict)) (/= 0 (-dict-forbiddenword-flag dict))))
+      (-sugs-box-set box (delq nil (mapcar (lambda (s) (-fix-keepcase-sug dict s)) (-sugs-list box)))))
+
+    (-sugs-box-set box (-dedup-preserve-first (-sugs-list box)))
+
+    (mapcar (lambda (s) (-substr-replace (-dict-output-oconv dict) s)) (-sugs-list box))))
+
+(defun -suggest-priv (dict word)
+  "Return VIBE-SPELL-SUGGEST's suggestions for WORD, as a plain list.
+Applies DICT's input ICONV to WORD and trims its trailing abbreviation
+dots, if any, then handles Nuspell's `compound_force_uppercase'
+early-exit special case before dispatching to `-suggest-for-casing'.
+Mirrors Nuspell's `Suggester::suggest_priv'."
+  (unless (string-empty-p word)
+    (let* ((word (-substr-replace (-dict-input-iconv dict) word))
+           (abbreviation (eq (aref word (1- (length word))) ?.))
+           (word (if abbreviation (substring word 0 (-string-last-non-dot word)) word)))
+      (unless (string-empty-p word)
+        (let ((casing (-classify-casing word)))
+          (if (and (eq casing 'small)
+                   (/= 0 (-dict-compound-force-uppercase dict))
+                   (-check-compound dict word t))
+              (list (-to-title word))
+            (-suggest-for-casing dict word casing)))))))
 
 ;;;; Dictionary (.dic) parsing
 
@@ -1085,16 +1933,41 @@ If WORD is ALL-CAPITAL (with non-empty FLAGS), PASCAL or CAMEL cased,
 also add a title-cased duplicate flagged as a hidden homonym, so that
 checking the title-cased form of a word whose canonical form has
 different casing (e.g. an acronym) falls through to other checks
-rather than accepting it outright; see `-hidden-homonym-flag'."
+rather than accepting it outright; see `-hidden-homonym-p'."
   (let* ((table (-dict-words dict))
          (casing (-classify-casing word)))
-    (puthash word (cons flags (gethash word table)) table)
+    ;; Appended, not pushed: homonyms must stay in insertion order, since
+    ;; a later one can mask an earlier one for a flag (e.g. FORBIDDENWORD)
+    ;; that only some of them carry -- see `-check-simple-word'.
+    (puthash word (append (gethash word table) (list flags)) table)
     (when (or (and (eq casing 'all-capital) flags)
               (memq casing '(pascal camel)))
       (unless (-flags-contain flags (-dict-forbiddenword-flag dict))
         (let ((title (-to-title word)))
-          (puthash title (cons (cons -hidden-homonym-flag flags) (gethash title table))
+          ;; -1 marks this entry as a hidden homonym; see `-hidden-homonym-p'.
+          (puthash title (append (gethash title table) (list (cons -1 flags)))
                    table))))))
+
+(defun -dict-remove-word (dict word)
+  "Remove one nil-flags entry of WORD from DICT's words table.
+This is the counterpart of `-dict-add-word' called with nil FLAGS,
+which is how `vibe-spell-add-word' always calls it; an entry with
+non-nil flags, e.g. one loaded from the dictionary's own .dic file, is
+left alone even if WORD also has a nil-flags entry alongside it.  Any
+hidden-homonym duplicate `-dict-add-word' may have added for WORD
+elsewhere is left in place; it has no effect on checking, only on
+whether that title-cased spelling is skipped when found directly (see
+`-hidden-homonym-p'), so an unused leftover one is harmless.
+
+Return non-nil if such an entry was found and removed."
+  (let* ((table (-dict-words dict))
+         (old-list (gethash word table)))
+    (when (memq nil old-list)
+      (let ((new-list (cl-remove nil old-list :count 1)))
+        (if new-list
+            (puthash word new-list table)
+          (remhash word table)))
+      t)))
 
 (defun -parse-dic (dict file)
   "Parse .dic FILE into DICT."
@@ -1165,8 +2038,8 @@ for a data line beyond the declared count (ignored)."
         (while (and (< i n) (not (eq (aref str i) ?\))))
           (setq i (1+ i)))
         (let ((flag (if (eq group-len 2)
-                         (logior (ash (aref str start) 8) (aref str (1+ start)))
-                       (string-to-number (substring str start i)))))
+                        (logior (ash (aref str start) 8) (aref str (1+ start)))
+                      (string-to-number (substring str start i)))))
           (setq i (1+ i))                ; skip ")"
           (let (quant)
             (when (and (< i n) (memq (aref str i) '(?? ?*)))
@@ -1204,6 +2077,84 @@ and \"$\", are dropped, matching Nuspell's `Break_Table::order_entries'."
         (cl-pushnew (car node) flags)))
     flags))
 
+;;;; Suggestion-related affix tables (REP, MAP, ICONV/OCONV)
+
+(defun -parse-similarity-group (str)
+  "Parse one MAP line STR into a `-similarity-group'.
+Text outside parentheses becomes equivalent single characters; a
+single character inside parentheses is added the same way, but a
+multi-character parenthesized run is instead added as a whole
+equivalent string.  Mirrors Nuspell's `Similarity_Group::parse'."
+  (let ((i 0) (n (length str)) chars strings (done nil))
+    (while (and (< i n) (not done))
+      (let ((open (cl-position ?\( str :start i)))
+        (if (not open)
+            (progn (setq chars (concat chars (substring str i))) (setq done t))
+          (setq chars (concat chars (substring str i open)))
+          (let ((close (cl-position ?\) str :start (1+ open))))
+            (if (not close)
+                (setq done t)
+              (let ((len (- close open 1)))
+                (cond
+                 ((= len 1) (setq chars (concat chars (substring str (1+ open) close))))
+                 ((> len 1) (push (substring str (1+ open) close) strings)))
+                (setq i (1+ close))))))))
+    (-similarity-group-create :chars chars :strings (nreverse strings))))
+
+(defun -build-replacement-table (pairs)
+  "Partition REP PAIRS, each (FROM . TO), by anchor into 4 lists.
+Return (WHOLE-WORD START-WORD END-WORD ANY-PLACE), each a list of
+\(FROM . TO) with any \"^\"/\"$\" anchor stripped from FROM.  Entries
+whose FROM is empty or a bare \"^\"/\"$\" are dropped.  Mirrors
+Nuspell's `Replacement_Table::order_entries'."
+  (let (whole start end any)
+    (dolist (p pairs)
+      (let ((from (car p)) (to (cdr p)))
+        (unless (or (string-empty-p from) (member from '("^" "$")))
+          (let* ((starts (eq (aref from 0) ?^))
+                 (ends (eq (aref from (1- (length from))) ?$))
+                 (from (cond ((and starts ends) (substring from 1 -1))
+                             (starts (substring from 1))
+                             (ends (substring from 0 -1))
+                             (t from))))
+            (cond
+             ((and starts ends) (push (cons from to) whole))
+             (starts (push (cons from to) start))
+             (ends (push (cons from to) end))
+             (t (push (cons from to) any)))))))
+    (list (nreverse whole) (nreverse start) (nreverse end) (nreverse any))))
+
+(defun -build-substr-replacer (pairs)
+  "Build an ICONV/OCONV substitution table from (FROM . TO) PAIRS.
+Entries with an empty FROM are dropped; see `-substr-replace'."
+  (cl-remove-if (lambda (p) (string-empty-p (car p))) pairs))
+
+(defun -substr-replacer-find (table s i)
+  "Return the (FROM . TO) entry of TABLE whose FROM is the longest match
+at position I of S, or nil if none matches there."
+  (let (best)
+    (dolist (p table)
+      (let ((from (car p)))
+        (when (and (<= (+ i (length from)) (length s))
+                   (or (not best) (> (length from) (length (car best))))
+                   (string= from (substring s i (+ i (length from)))))
+          (setq best p))))
+    best))
+
+(defun -substr-replace (table s)
+  "Apply TABLE's longest-match-at-each-position substitutions throughout S.
+Mirrors Nuspell's `Substr_Replacer', used for ICONV/OCONV."
+  (if (null table)
+      s
+    (let ((i 0) (len (length s)) parts)
+      (while (< i len)
+        (let ((m (-substr-replacer-find table s i)))
+          (if m
+              (progn (push (cdr m) parts) (setq i (+ i (length (car m)))))
+            (push (substring s i (1+ i)) parts)
+            (setq i (1+ i)))))
+      (apply #'concat (nreverse parts)))))
+
 (defun -parse-aff-affix-line (dict command args cmd-affix)
   "Process one PFX/SFX line.  Return a new affix struct, or nil."
   (let* ((flag (-decode-first-flag (car args) (-dict-flag-type dict)))
@@ -1224,15 +2175,15 @@ and \"$\", are dropped, matching Nuspell's `Break_Table::order_entries'."
                  (appending0 (if slash (substring appending-raw 0 slash) appending-raw))
                  (appending (if (string= appending0 "0") "" appending0))
                  (cont-flags (and slash (-decode-flags-possible-alias
-                                          dict (substring appending-raw (1+ slash)))))
+                                         dict (substring appending-raw (1+ slash)))))
                  (condition (-compile-condition (or (nth 3 args) "."))))
             (if (string= command "PFX")
                 (-prefix-create :flag flag :cross-product cross
-                                 :stripping stripping :appending appending
-                                 :cont-flags cont-flags :condition condition)
+                                :stripping stripping :appending appending
+                                :cont-flags cont-flags :condition condition)
               (-suffix-create :flag flag :cross-product cross
-                               :stripping stripping :appending appending
-                               :cont-flags cont-flags :condition condition))))))))
+                              :stripping stripping :appending appending
+                              :cont-flags cont-flags :condition condition))))))))
 
 (defun -parse-aff (dict file)
   "Parse .aff FILE into DICT."
@@ -1242,6 +2193,8 @@ and \"$\", are dropped, matching Nuspell's `Break_Table::order_entries'."
     (let ((prefixes nil) (suffixes nil)
           (break-patterns nil) (break-seen nil)
           (compound-rules nil) (flag-aliases nil)
+          (rep-pairs nil) (similarities nil)
+          (iconv-pairs nil) (oconv-pairs nil)
           (cmd-affix (make-hash-table :test 'equal))
           (cmd-counts (make-hash-table :test 'equal)))
       (while (not (eobp))
@@ -1266,6 +2219,10 @@ and \"$\", are dropped, matching Nuspell's `Break_Table::order_entries'."
                             (t (error "vibe-spell: invalid FLAG type %S" (car args))))))
                ((string= command "IGNORE")
                 (setf (-dict-ignored-chars dict) (car args)))
+               ((string= command "TRY")
+                (setf (-dict-try-chars dict) (car args)))
+               ((string= command "KEY")
+                (setf (-dict-keyboard-closeness dict) (car args)))
                ((string= command "COMPLEXPREFIXES")
                 (setf (-dict-complex-prefixes dict) t))
                ((string= command "FULLSTRIP")
@@ -1284,6 +2241,15 @@ and \"$\", are dropped, matching Nuspell's `Break_Table::order_entries'."
                 (setf (-dict-keepcase-flag dict) (-decode-first-flag (car args) (-dict-flag-type dict))))
                ((string= command "NEEDAFFIX")
                 (setf (-dict-need-affix-flag dict) (-decode-first-flag (car args) (-dict-flag-type dict))))
+               ((string= command "NOSUGGEST")
+                (setf (-dict-nosuggest-flag dict) (-decode-first-flag (car args) (-dict-flag-type dict))))
+               ((string= command "MAXNGRAMSUGS")
+                (setf (-dict-max-ngram-suggestions dict) (string-to-number (car args))))
+               ((string= command "MAXDIFF")
+                (let ((v (string-to-number (car args))))
+                  (setf (-dict-max-diff-factor dict) (if (> v 10) 5 v))))
+               ((string= command "ONLYMAXDIFF")
+                (setf (-dict-only-max-diff dict) t))
                ((string= command "COMPOUNDFLAG")
                 (setf (-dict-compound-flag dict) (-decode-first-flag (car args) (-dict-flag-type dict))))
                ((string= command "COMPOUNDBEGIN")
@@ -1329,7 +2295,20 @@ and \"$\", are dropped, matching Nuspell's `Break_Table::order_entries'."
                 (pcase (-array-command-step cmd-counts command (car args))
                   ('data (push (-parse-compound-rule-line (car args) (-dict-flag-type dict))
                                compound-rules))))
-               ((member command '("MAP" "REP" "PHONE" "ICONV" "OCONV" "CHECKCOMPOUNDPATTERN" "AM"))
+               ((string= command "REP")
+                (pcase (-array-command-step cmd-counts command (car args))
+                  ('data (push (cons (nth 0 args) (string-replace "_" " " (nth 1 args)))
+                               rep-pairs))))
+               ((string= command "MAP")
+                (pcase (-array-command-step cmd-counts command (car args))
+                  ('data (push (-parse-similarity-group (car args)) similarities))))
+               ((string= command "ICONV")
+                (pcase (-array-command-step cmd-counts command (car args))
+                  ('data (push (cons (nth 0 args) (nth 1 args)) iconv-pairs))))
+               ((string= command "OCONV")
+                (pcase (-array-command-step cmd-counts command (car args))
+                  ('data (push (cons (nth 0 args) (nth 1 args)) oconv-pairs))))
+               ((member command '("PHONE" "CHECKCOMPOUNDPATTERN" "AM"))
                 (-array-command-step cmd-counts command (car args)))
                (t nil)))))
         (forward-line 1))
@@ -1352,7 +2331,16 @@ and \"$\", are dropped, matching Nuspell's `Break_Table::order_entries'."
       (setf (-dict-compound-rules dict) (nreverse compound-rules))
       (setf (-dict-compound-rules-all-flags dict)
             (-compute-compound-rules-all-flags (-dict-compound-rules dict)))
-      (setf (-dict-flag-aliases dict) (vconcat (nreverse flag-aliases))))))
+      (setf (-dict-flag-aliases dict) (vconcat (nreverse flag-aliases)))
+      (pcase-let ((`(,whole ,start ,end ,any)
+                   (-build-replacement-table (nreverse rep-pairs))))
+        (setf (-dict-rep-whole dict) whole)
+        (setf (-dict-rep-start dict) start)
+        (setf (-dict-rep-end dict) end)
+        (setf (-dict-rep-any dict) any))
+      (setf (-dict-similarities dict) (nreverse similarities))
+      (setf (-dict-input-iconv dict) (-build-substr-replacer (nreverse iconv-pairs)))
+      (setf (-dict-output-oconv dict) (-build-substr-replacer (nreverse oconv-pairs))))))
 
 ;;;; Personal dictionary
 
@@ -1388,6 +2376,23 @@ NAME is the dictionary name passed to `vibe-spell-create'."
 FILE, and its parent directory, are created if they do not exist yet."
   (make-directory (file-name-directory file) t)
   (write-region (concat word "\n") nil file t))
+
+(defun -remove-personal-word (file word)
+  "Remove each line equal to WORD from personal dictionary FILE.
+Return non-nil if FILE exists and had at least one such line."
+  (when (file-readable-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (goto-char (point-min))
+      (let (removed)
+        (while (not (eobp))
+          (if (string= (-chomp-cr (buffer-substring-no-properties (pos-bol) (pos-eol))) word)
+              (progn (delete-region (pos-bol) (min (point-max) (1+ (pos-eol))))
+                     (setq removed t))
+            (forward-line 1)))
+        (when removed
+          (write-region (point-min) (point-max) file))
+        removed))))
 
 ;; Local Variables:
 ;; read-symbol-shorthands: (("-" . "vibe-spell--"))

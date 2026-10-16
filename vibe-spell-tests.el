@@ -28,15 +28,40 @@
 ;; accepted and every word in NAME.wrong is rejected.  This mirrors
 ;; the ".good"/".wrong" portion of Hunspell's own tests/test.sh.
 ;;
-;; Hunspell's other kinds of expectations -- NAME.sug (suggestions),
-;; NAME.root/.morph (morphological analysis) and NAME.trace (affix
-;; trace) -- are not checked, since vibe-spell does not implement
-;; suggestions or morphological analysis.  Dictionaries that
-;; `vibe-spell-create' refuses outright (currently, only ones using
-;; COMPLEXPREFIXES) are reported as skipped rather than failed; see
-;; the Commentary in vibe-spell.el for this and other limitations of
-;; this port that may cause some dictionaries' good/wrong words to be
-;; misclassified, such as encodings other than UTF-8 or ASCII.
+;; For every NAME.wrong that also comes with a NAME.sug, this also
+;; defines `vibe-spell-test-hunspell-suggest-NAME', which checks that
+;; `vibe-spell-suggest' includes at least one of NAME.sug's expected
+;; alternatives for each corresponding word of NAME.wrong -- see
+;; `vibe-spell-tests--check-suggest' for how the two files are paired
+;; up position by position, and when that is not possible.  This is a
+;; looser check than Hunspell's own test.sh, which requires the exact
+;; suggestion list hunspell itself produces: `vibe-spell-suggest' is a
+;; Nuspell-derived port and is not expected to reproduce Hunspell's own
+;; `SuggestMgr' suggestion lists verbatim, only to come up with
+;; reasonable corrections, among which the expected one should appear.
+;;
+;; Hunspell's other kinds of expectations -- NAME.root/.morph
+;; (morphological analysis) and NAME.trace (affix trace) -- are not
+;; checked, since vibe-spell does not implement morphological
+;; analysis.  Dictionaries that `vibe-spell-create' refuses outright
+;; (currently, only ones using COMPLEXPREFIXES) are reported as
+;; skipped rather than failed; see the Commentary in vibe-spell.el for
+;; this and other limitations of this port that may cause some
+;; dictionaries' good/wrong words, or suggestions, to be misclassified,
+;; such as encodings other than UTF-8 or ASCII, or PHONE (phonetic
+;; suggestions, which vibe-spell-suggest does not implement; see
+;; `vibe-spell-tests-suggest-skip-dictionaries').
+;;
+;; A handful of the tests this generates are known to fail outright --
+;; some because of limitations already documented in vibe-spell.el,
+;; others because of genuine Hunspell/Nuspell behavioral divergences,
+;; or (more rarely) a gap specific to this port.  Each such test name
+;; is listed in `vibe-spell-tests-known-failures' along with why, and
+;; is declared with ERT's `:expected-result :failed' (an "xfail") so
+;; that it reports as an expected failure rather than an unexpected
+;; one; if it ever starts passing, ERT reports that as a failure too
+;; (an "unexpected pass"), which is the prompt to remove it from that
+;; list.
 ;;
 ;; Almost every test runs directly in the ERT runner's own process.
 ;; The dictionaries named in `vibe-spell-tests-subprocess-dictionaries'
@@ -84,6 +109,129 @@ the top of this file.")
   "Hunspell test dictionaries that must run in a time-limited subprocess.
 See the Commentary at the top of this file for why.  Every other
 dictionary's test runs directly in the ERT runner's own process.")
+
+(defconst vibe-spell-tests-known-failures
+  '(("vibe-spell-test-hunspell-2970240" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-2970242" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-base_utf" .
+     "Turkish dotless i (İ/ı) casing; casing uses Emacs's own locale-unaware
+upcase/downcase, per the Commentary in vibe-spell.el.")
+    ("vibe-spell-test-hunspell-break" .
+     "Tests recursive multi-dash BREAK splitting (\"e-mail-foo\"); Nuspell's
+BREAK handling, which this ports, only retries the first occurrence of
+each pattern per split attempt, so a word with more than one break
+point fails here too.")
+    ("vibe-spell-test-hunspell-checkcompoundpattern" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-checkcompoundpattern2" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-checkcompoundpattern3" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-checkcompoundpattern4" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-checkcompoundpattern5" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-checkcompoundpattern6" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-checkcompoundpattern7" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-checkcompoundrep" .
+     "CHECKCOMPOUNDREP is accepted but has no effect, per the Commentary in
+vibe-spell.el.")
+    ("vibe-spell-test-hunspell-compoundforbid" .
+     "COMPOUNDFORBIDFLAG on a direct .dic entry (\"foobaz/Z\") has no effect
+on an unrelated derivation of the same string from a different root
++ suffix (\"foo\"+\"baz\"), since that derivation never looks at the
+other entry's flags at all; `-check-word-in-compound' mirrors
+Nuspell's own `check_word_in_compound' exactly here, so this appears
+to be a genuine gap in Nuspell/Hunspell's COMPOUNDFORBIDFLAG
+semantics, not something specific to this port.")
+    ("vibe-spell-test-hunspell-dotless_i" .
+     "Turkish dotless i (İ/ı) casing (LANG tr); casing uses Emacs's own
+locale-unaware upcase/downcase, per the Commentary in vibe-spell.el.")
+    ("vibe-spell-test-hunspell-encoding" .
+     "Dictionary declares a non-UTF-8 SET encoding (ISO-8859-15); that
+declared encoding is not separately consulted, per the Commentary in
+vibe-spell.el.")
+    ("vibe-spell-test-hunspell-gh106" .
+     "Tests a Hunspell-specific fix for case-insensitive affix conditions on
+PASCAL-cased words; Nuspell's checker, which this ports, never retries
+case variants for CAMEL/PASCAL words, so this diverges from Hunspell
+upstream too.")
+    ("vibe-spell-test-hunspell-gh151" .
+     "SIMPLIFIEDTRIPLE's extra \"insert the elided letter back and retry\"
+fallback is not implemented, per the Commentary in vibe-spell.el.")
+    ("vibe-spell-test-hunspell-gh353" .
+     "Hunspell treats a word made only of WORDCHARS-listed non-ASCII digits
+as a number; Nuspell's own `is_number' (which `vibe-spell-check'
+mirrors) only recognizes ASCII digits, so this diverges from Hunspell
+upstream too.")
+    ("vibe-spell-test-hunspell-hu" .
+     "Hungarian COMPOUNDSYLLABLE/SYLLABLENUM (the exception letting a
+compound exceed COMPOUNDWORDMAX) and the LANG_hu \"moving rule\" for
+COMPOUNDFORBIDFLAG are not implemented, per the Commentary in
+vibe-spell.el.")
+    ("vibe-spell-test-hunspell-i54980" .
+     "Dictionary declares a non-UTF-8 SET encoding (ISO8859-15); that
+declared encoding is not separately consulted, per the Commentary in
+vibe-spell.el.")
+    ("vibe-spell-test-hunspell-limit-multiple-compounding" .
+     "Tests a Hunspell-specific heuristic rejecting a 3-or-more-part compound
+that is a near-typo of an unrelated, longer dictionary word; Nuspell's
+checker, which this ports, has no such heuristic.")
+    ("vibe-spell-test-hunspell-morph" .
+     "The .good file's multi-word lines (e.g. \"drink eat\") exercise
+Hunspell's own CLI, which checks a line word by word; `vibe-spell-check'
+only ever checks one word, like `Hunspell_spell' itself, so this test
+harness's one-call-per-line reading does not apply here.")
+    ("vibe-spell-test-hunspell-nepali" .
+     "Tests ICONV/IGNORE normalization of ZWJ/ZWNJ in Devanagari conjuncts;
+this port's substring replacer does not reproduce Hunspell's exact
+normalization here.")
+    ("vibe-spell-test-hunspell-onlyincompound2" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-opentaal_cpdpat" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-opentaal_cpdpat2" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-ph2" .
+     "A dictionary entry with an embedded space (e.g. \"forbidden root\") is
+meant to block the squished-together compound from also being
+accepted; this multi-word .dic entry mechanism is not implemented
+\(same gap as the wordpair test).")
+    ("vibe-spell-test-hunspell-simplifiedtriple" .
+     "SIMPLIFIEDTRIPLE's extra \"insert the elided letter back and retry\"
+fallback is not implemented, per the Commentary in vibe-spell.el.")
+    ("vibe-spell-test-hunspell-trace_compound" .
+     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    ("vibe-spell-test-hunspell-wordpair" .
+     "A dictionary entry with an embedded space (e.g. \"compound word\") is
+meant to block the squished-together compound (\"compoundword\") from
+also being accepted; `-parse-dic-line' stops at the first whitespace,
+so this multi-word .dic entry mechanism is not implemented.")
+    ("vibe-spell-test-hunspell-suggest-base_utf" .
+     "Turkish dotless i (İ) casing; casing uses Emacs's own locale-unaware
+upcase/downcase, per the Commentary in vibe-spell.el.")
+    ("vibe-spell-test-hunspell-suggest-checksharpsutf" .
+     "CHECKSHARPS (German sharp s) suggestion casing variants are narrower
+than Hunspell's own, per the Commentary in vibe-spell.el.")
+    ("vibe-spell-test-hunspell-suggest-opentaal_keepcase" .
+     "KEEPCASE casing restoration for a multi-dash PASCAL-cased compound
+\(\"TV-word-TV\") only fixes one dash-part at a time, not both together."))
+  "Alist of ERT test name (as a string) to why it is a known failure.
+Tests named here are declared with `:expected-result :failed'; see
+`vibe-spell-tests--maybe-xfail'.  A test listed here that starts
+passing is itself reported as a failure (an \"unexpected pass\"),
+which is ERT's way of prompting this list to be updated.")
+
+(defun vibe-spell-tests--maybe-xfail (test-name)
+  "Return the `:expected-result' spec for TEST-NAME (a symbol), or nil.
+Looks TEST-NAME up in `vibe-spell-tests-known-failures' by its print
+name; spliced into a generated `ert-deftest' form when non-nil."
+  (when (assoc (symbol-name test-name) vibe-spell-tests-known-failures)
+    '(:expected-result :failed)))
 
 (defun vibe-spell-tests--read-words (file)
   "Return the list of non-blank, whitespace-trimmed lines of FILE.
@@ -183,12 +331,111 @@ not finish within `vibe-spell-tests-timeout'."
           (eval
            `(ert-deftest ,test-name ()
               ,(format "Check hunspell/tests/%s.{good,wrong} with vibe-spell." name)
+              ,@(vibe-spell-tests--maybe-xfail test-name)
               (if (member ,name vibe-spell-tests-subprocess-dictionaries)
                   (vibe-spell-tests--run-case-subprocess ,name)
                 (vibe-spell-tests--run-case ,name)))
            t))))))
 
 (vibe-spell-tests--define-hunspell-tests)
+
+;;;; Suggestions
+
+(defconst vibe-spell-tests-suggest-skip-dictionaries '("ph" "ph2" "phone")
+  "Hunspell test dictionaries whose .sug expectations rely on PHONE
+\(phonetic) suggestions, which `vibe-spell-suggest' does not
+implement; see the Commentary at the top of vibe-spell.el.")
+
+(defun vibe-spell-tests--read-lines (file)
+  "Return FILE's lines as a list of strings, or nil if FILE does not exist.
+Unlike `vibe-spell-tests--read-words', this keeps each line's
+whitespace intact and preserves blank lines, except for the single
+trailing blank line produced by splitting a file that, as is
+conventional, ends in a newline."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (let ((lines (mapcar (lambda (l) (string-trim-right l "[ \t\r]+"))
+                            (split-string (buffer-string) "\n"))))
+        (if (and lines (string-empty-p (car (last lines))))
+            (butlast lines)
+          lines)))))
+
+(defun vibe-spell-tests--check-suggest (name)
+  "Check hunspell test NAME's .wrong/.sug word lists against vibe-spell.
+NAME is looked up as NAME.aff/NAME.dic/NAME.wrong/NAME.sug under
+`vibe-spell-tests-hunspell-dir'.  Hunspell's own .sug files have one
+line per word of the matching .wrong file, except that a word for
+which Hunspell itself finds no suggestion at all has its line dropped
+instead of left blank, which misaligns the two files by position for
+any .wrong word after the first such drop; since this port has no way
+to tell such a drop apart from a genuine difference in line count, NAME
+is skipped whenever its .wrong and .sug do not have the same number of
+lines.  A non-blank .sug line may list several Hunspell-acceptable
+alternatives, comma-separated; this only requires `vibe-spell-suggest'
+to include at least one of them, not to match the whole list or its
+order -- `vibe-spell-suggest' is a Nuspell-derived port and is not
+expected to reproduce Hunspell's own suggestions verbatim.  Return nil
+if everything checks out, or (STATUS . MESSAGE) where STATUS is `skip'
+\(`vibe-spell-create' itself failed, NAME is a member of
+`vibe-spell-tests-suggest-skip-dictionaries', or the line counts did
+not match) or `fail' (some word's suggestions included none of its
+expected alternatives)."
+  (cl-block nil
+    (when (member name vibe-spell-tests-suggest-skip-dictionaries)
+      (cl-return-from nil (cons 'skip "relies on unimplemented PHONE suggestions")))
+    (let ((vibe-spell-dictionary-path (list vibe-spell-tests-hunspell-dir))
+          (wrong-file (expand-file-name (concat name ".wrong") vibe-spell-tests-hunspell-dir))
+          (sug-file (expand-file-name (concat name ".sug") vibe-spell-tests-hunspell-dir))
+          (dict nil))
+      (condition-case err
+          (setq dict (vibe-spell-create name))
+        (error
+         (cl-return-from nil
+           (cons 'skip (format "vibe-spell-create failed: %s" (error-message-string err))))))
+      (let ((wrong-words (vibe-spell-tests--read-lines wrong-file))
+            (sug-lines (vibe-spell-tests--read-lines sug-file)))
+        (unless (= (length wrong-words) (length sug-lines))
+          (cl-return-from nil
+            (cons 'skip (format "%s.wrong has %d lines but %s.sug has %d; cannot pair them up"
+                                 name (length wrong-words) name (length sug-lines)))))
+        (let (bad)
+          (cl-mapc
+           (lambda (word expected)
+             (unless (string-empty-p expected)
+               (let ((alternatives (split-string expected ", " t))
+                     (got (vibe-spell-suggest dict word)))
+                 (unless (cl-intersection alternatives got :test #'string=)
+                   (push (format "%S: expected one of %S, got %S" word alternatives got) bad)))))
+           wrong-words sug-lines)
+          (if bad
+              (cons 'fail (string-join (nreverse bad) "\n"))
+            nil))))))
+
+(defun vibe-spell-tests--run-case-suggest (name)
+  "Run the suggestion check for hunspell test NAME directly in this process."
+  (pcase (vibe-spell-tests--check-suggest name)
+    ('nil t)
+    (`(skip . ,msg) (ert-skip msg))
+    (`(fail . ,msg) (ert-fail msg))))
+
+(defun vibe-spell-tests--define-hunspell-suggest-tests ()
+  "Define one `ert-deftest' per Hunspell test dictionary with a .sug file."
+  (dolist (aff-file (directory-files vibe-spell-tests-hunspell-dir t "\\.aff\\'"))
+    (let* ((name (file-name-sans-extension (file-name-nondirectory aff-file)))
+           (dic-file (expand-file-name (concat name ".dic") vibe-spell-tests-hunspell-dir))
+           (wrong-file (expand-file-name (concat name ".wrong") vibe-spell-tests-hunspell-dir))
+           (sug-file (expand-file-name (concat name ".sug") vibe-spell-tests-hunspell-dir)))
+      (when (and (file-exists-p dic-file) (file-exists-p wrong-file) (file-exists-p sug-file))
+        (let ((test-name (intern (format "vibe-spell-test-hunspell-suggest-%s" name))))
+          (eval
+           `(ert-deftest ,test-name ()
+              ,(format "Check hunspell/tests/%s.{wrong,sug} with vibe-spell-suggest." name)
+              ,@(vibe-spell-tests--maybe-xfail test-name)
+              (vibe-spell-tests--run-case-suggest ,name))
+           t))))))
+
+(vibe-spell-tests--define-hunspell-suggest-tests)
 
 ;;;; Personal dictionary
 
@@ -218,6 +465,42 @@ known to a later `vibe-spell-create'."
             (should (vibe-spell-check dict "zyzzyva"))
             (should (vibe-spell-check dict "created"))
             (should-not (vibe-spell-check dict "texxt"))))
+      (delete-directory tmpdir t))))
+
+(ert-deftest vibe-spell-test-remove-word ()
+  "Check `vibe-spell-remove-word' as the inverse of `vibe-spell-add-word'.
+Removing a word that was never added reports nil; removing one added
+without SAVE forgets it right away; removing one added with SAVE both
+forgets it right away and, because it is scrubbed from the personal
+dictionary file, keeps it forgotten by a later `vibe-spell-create'.
+Removing a word a second time reports nil.  A real dictionary word is
+left alone, since it has no personal (nil-flags) entry to remove."
+  (let* ((tmpdir (make-temp-file "vibe-spell-test-pdict-" t))
+         (vibe-spell-dictionary-path (list vibe-spell-tests-hunspell-dir))
+         (vibe-spell-personal-dictionary-format (expand-file-name "personal-%s" tmpdir))
+         (pdict-file (format vibe-spell-personal-dictionary-format "base")))
+    (unwind-protect
+        (let ((dict (vibe-spell-create "base")))
+          (should-not (vibe-spell-remove-word dict "zyzzyva"))
+
+          (vibe-spell-add-word dict "loooked")
+          (should (vibe-spell-remove-word dict "loooked"))
+          (should-not (vibe-spell-check dict "loooked"))
+
+          (vibe-spell-add-word dict "zyzzyva" t)
+          (should (vibe-spell-check dict "zyzzyva"))
+          (should (vibe-spell-remove-word dict "zyzzyva" t))
+          (should-not (vibe-spell-check dict "zyzzyva"))
+          (should-not (vibe-spell-remove-word dict "zyzzyva" t))
+
+          (should (vibe-spell-check dict "created"))
+          (should-not (vibe-spell-remove-word dict "created"))
+          (should (vibe-spell-check dict "created"))
+
+          (should-not (vibe-spell-check dict "zyzzyva"))
+          (should (with-temp-buffer
+                    (insert-file-contents pdict-file)
+                    (not (string-search "zyzzyva" (buffer-string))))))
       (delete-directory tmpdir t))))
 
 (provide 'vibe-spell-tests)

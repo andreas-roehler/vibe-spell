@@ -23,7 +23,7 @@
 ;; Measures how long `vibe-spell-create' takes to load a dictionary,
 ;; and how long `vibe-spell-check' then takes to check every word of
 ;; a word list -- the dictionary name and the word-list file are
-;; given as command-line arguments (see `vibe-spell-bench-run'); the
+;; given as command-line arguments (see `vibe-spell-bench-check'); the
 ;; word list is normally
 ;; hunspell/tests/suggestiontest/List_of_common_misspellings.txt, a
 ;; Wikipedia-sourced list of English misspelling/correction pairs
@@ -51,8 +51,20 @@
 ;; actually uses it -- loading a dictionary once, then checking many
 ;; words against it over time.
 ;;
+;; `vibe-spell-bench-suggest' similarly measures how long
+;; `vibe-spell-suggest' takes, over the same kind of misspelling list,
+;; but called once per misspelling rather than once per word of
+;; running prose, since a flat list of real misspellings is a much
+;; more representative input for suggestions than words picked out of
+;; ordinary text (almost all of which are already correctly spelled).
+;; It also reports, as a rough quality indicator rather than a
+;; pass/fail test, how often the word list's expected correction
+;; turns up anywhere in the suggestion list.
+;;
 ;; This is a batch-only, noninteractive script.  Run with, e.g.:
-;;   emacs -batch -L . -l vibe-spell-bench.el -f vibe-spell-bench-run \
+;;   emacs -batch -L . -l vibe-spell-bench.el -f vibe-spell-bench-check \
+;;         en_US hunspell/tests/suggestiontest/List_of_common_misspellings.txt
+;;   emacs -batch -L . -l vibe-spell-bench.el -f vibe-spell-bench-suggest \
 ;;         en_US hunspell/tests/suggestiontest/List_of_common_misspellings.txt
 ;;
 ;; Unless `native-comp-eln-load-path' is nil (e.g. because the caller
@@ -69,6 +81,10 @@
 (require 'benchmark)
 (require 'vibe-spell)
 
+;; Set it to the default interactive value (batch mode raises it to
+;; 1.0).
+(setq gc-cons-percentage 0.1)
+
 (defconst vibe-spell-bench--project-dir
   (file-name-directory (or load-file-name buffer-file-name default-directory))
   "Directory containing vibe-spell.el and vibe-spell-bench.el.")
@@ -83,12 +99,12 @@ nil, in which case this does nothing."
         (load (native-compile (expand-file-name "vibe-spell.el" vibe-spell-bench--project-dir)))
       (error "vibe-spell-bench: native compilation is not available"))))
 
-(defun vibe-spell-bench-run (&optional dict-name file)
+(defun vibe-spell-bench-check (&optional dict-name file)
   "Benchmark loading dictionary DICT-NAME and checking FILE's words.
 
 DICT-NAME and FILE default to the first two leftover command-line
 arguments, for use as `emacs -batch -l vibe-spell-bench.el -f
-vibe-spell-bench-run DICT-NAME FILE'.  This function is noninteractive
+vibe-spell-bench-check DICT-NAME FILE'.  This function is noninteractive
 -- it is meant to be run this way, not via \\[execute-extended-command].
 
 Unless `native-comp-eln-load-path' is nil, this ensures vibe-spell.el
@@ -123,8 +139,7 @@ benchmark:  %s %s %s
 load dict:  %.3fs, %d GCs taking %.3fs
 check:      %d words, %d correct
             %.3fs total, %d GCs taking %.3fs
-            %.3fK words/s,
-"
+            %.3fK words/s"
                (if (native-comp-function-p (symbol-function 'vibe-spell-check))
                    "native"
                  "bytecomp")
@@ -135,6 +150,83 @@ check:      %d words, %d correct
                (/ (/ word-count check-seconds) 1000.0))
       (list word-count correct-count load-seconds load-gcs load-gc-seconds
             check-seconds check-gcs check-gc-seconds))))
+
+(defun vibe-spell-bench--read-misspelling-pairs (file)
+  "Return FILE's misspelling/correction pairs as a list of (WRONG . RIGHT).
+FILE is tab-separated, one pair per line, like
+hunspell/tests/suggestiontest/List_of_common_misspellings.txt; blank
+lines, comment lines starting with \"#\", and any other line that does
+not split into exactly WRONG and RIGHT (such as that file's own
+trailing Wikipedia category marker) are skipped."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (let (pairs)
+      (dolist (line (split-string (buffer-string) "\n" t))
+        (unless (or (string-empty-p line) (eq (aref line 0) ?#))
+          (let ((fields (split-string line "\t")))
+            (when (length= fields 2)
+              (push (cons (nth 0 fields) (nth 1 fields)) pairs)))))
+      (nreverse pairs))))
+
+(defun vibe-spell-bench-suggest (&optional dict-name file)
+  "Benchmark loading dictionary DICT-NAME and suggesting corrections for FILE.
+
+DICT-NAME and FILE default to the first two leftover command-line
+arguments, for use as `emacs -batch -l vibe-spell-bench.el -f
+vibe-spell-bench-suggest DICT-NAME FILE'.  This function is
+noninteractive -- it is meant to be run this way, not via
+\\[execute-extended-command].
+
+FILE is a tab-separated misspelling/correction word list, normally
+hunspell/tests/suggestiontest/List_of_common_misspellings.txt; see
+`vibe-spell-bench--read-misspelling-pairs'.  It is read into memory
+once, up front; `vibe-spell-suggest' is then timed calling it once per
+misspelling, in file order.  Unlike `vibe-spell-bench-check', which only
+measures speed, this also reports how often the expected correction
+turns up anywhere in the suggestion list, as a rough quality check --
+not the strict pass/fail of a test, just a benchmark-friendly number to
+watch for regressions.
+
+Unless `native-comp-eln-load-path' is nil, this ensures vibe-spell.el
+runs native-compiled before benchmarking it; see the Commentary above.
+
+Return and (via `message') report (PAIR-COUNT FOUND-COUNT LOAD-SECONDS
+LOAD-GCS LOAD-GC-SECONDS SUGGEST-SECONDS SUGGEST-GCS
+SUGGEST-GC-SECONDS); the *-SECONDS/-GCS/-GC-SECONDS triples are as
+produced by `benchmark-run'."
+  (let ((dict-name (or dict-name (pop command-line-args-left)
+                        (error "vibe-spell-bench: no dictionary name given")))
+        (file (or file (pop command-line-args-left)
+                   (error "vibe-spell-bench: no word-list file given")))
+        (dict nil)
+        (found-count 0))
+    (vibe-spell-bench--ensure-native)
+    (pcase-let*
+        ((`(,load-seconds ,load-gcs ,load-gc-seconds)
+          (benchmark-run (setq dict (vibe-spell-create dict-name))))
+         (pairs (vibe-spell-bench--read-misspelling-pairs file))
+         (`(,suggest-seconds ,suggest-gcs ,suggest-gc-seconds)
+          (benchmark-run
+           (dolist (pair pairs)
+             (when (member (cdr pair) (vibe-spell-suggest dict (car pair)))
+               (setq found-count (1+ found-count)))))))
+      (message "\
+benchmark:  %s %s %s
+load dict:  %.3fs, %d GCs taking %.3fs
+suggest:    %d words, %d with the correction suggested (%.1f%%)
+            %.3fs total, %d GCs taking %.3fs
+            %.3f words/s"
+               (if (native-comp-function-p (symbol-function 'vibe-spell-suggest))
+                   "native"
+                 "bytecomp")
+               dict-name file
+               load-seconds load-gcs load-gc-seconds
+               (length pairs) found-count
+               (/ (* 100.0 found-count) (max 1 (length pairs)))
+               suggest-seconds suggest-gcs suggest-gc-seconds
+               (/ (length pairs) suggest-seconds))
+      (list (length pairs) found-count load-seconds load-gcs load-gc-seconds
+            suggest-seconds suggest-gcs suggest-gc-seconds))))
 
 (provide 'vibe-spell-bench)
 ;;; vibe-spell-bench.el ends here

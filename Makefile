@@ -14,7 +14,11 @@ clean:
 	rm -rf $(ELC) bin
 
 CC ?= cc
-bin/hunspell-bench: hunspell-bench.c
+bin/hunspell-bench-check: hunspell-bench-check.c
+	mkdir -p bin
+	$(CC) -O2 -o $@ $< $$(pkg-config --cflags --libs hunspell)
+
+bin/hunspell-bench-suggest: hunspell-bench-suggest.c
 	mkdir -p bin
 	$(CC) -O2 -o $@ $< $$(pkg-config --cflags --libs hunspell)
 
@@ -35,19 +39,35 @@ tests: hunspell nuspell
 
 BENCH_LINES ?= 1000
 
-.PHONY: bench
-bench: gutenberg all bin/hunspell-bench
+.PHONY: bench-check
+bench-check: gutenberg all bin/hunspell-bench-check
 	head -n $(BENCH_LINES) gutenberg/alice.txt > gutenberg/alice-sample.txt
 	head -n $(BENCH_LINES) gutenberg/lusiadas.txt > gutenberg/lusiadas-sample.txt
 	@echo ================================================================================
-	@./bin/hunspell-bench en_US gutenberg/alice-sample.txt
+	@./bin/hunspell-bench-check en_US gutenberg/alice-sample.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-run en_US gutenberg/alice-sample.txt
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-check en_US gutenberg/alice-sample.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-run en_US gutenberg/alice-sample.txt
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-check en_US gutenberg/alice-sample.txt
 	@echo ================================================================================
-	@./bin/hunspell-bench pt_BR gutenberg/lusiadas-sample.txt
+	@./bin/hunspell-bench-check pt_BR gutenberg/lusiadas-sample.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-run pt_BR gutenberg/lusiadas-sample.txt
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-check pt_BR gutenberg/lusiadas-sample.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-run pt_BR gutenberg/lusiadas-sample.txt
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-check pt_BR gutenberg/lusiadas-sample.txt
+
+MISSPELLINGS = hunspell/tests/suggestiontest/List_of_common_misspellings.txt
+BENCH_SUGGEST_LINES ?= 200
+
+.PHONY: bench-suggest
+bench-suggest: all bin/hunspell-bench-suggest
+	mkdir -p gutenberg
+	head -n $(BENCH_SUGGEST_LINES) $(MISSPELLINGS) > gutenberg/misspellings-sample.txt
+	@echo ================================================================================
+	@./bin/hunspell-bench-suggest en_US gutenberg/misspellings-sample.txt
+	@echo --------------------------------------------------------------------------------
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-suggest \
+		en_US gutenberg/misspellings-sample.txt
+	@echo --------------------------------------------------------------------------------
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-suggest \
+		en_US gutenberg/misspellings-sample.txt
