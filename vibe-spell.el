@@ -57,7 +57,10 @@
 ;; - Dictionary files are read using Emacs's own file-decoding; the
 ;;   SET directive's declared encoding is not separately consulted.
 ;; - The 360-character length limit in `vibe-spell-check' is counted in
-;;   characters rather than UTF-8 bytes.
+;;   characters rather than UTF-8 bytes.  Also, unlike Nuspell, a word
+;;   over the limit is treated as correctly spelled rather than as a
+;;   misspelling, so that long non-word tokens are not flagged as
+;;   errors.
 ;;
 ;; For affix stripping, Nuspell tries combinations of up to one prefix
 ;; and up to two suffixes (or vice versa); this port implements that
@@ -68,6 +71,80 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'xdg)
+
+(defgroup vibe-spell nil
+  "Hunspell-compatible spell checking library in pure Emacs Lisp."
+  :prefix "vibe-spell-"
+  :group 'text)
+
+(defcustom vibe-spell-dictionary-path
+  (mapcar (lambda (d) (expand-file-name "hunspell/" d))
+          (cons (xdg-data-home) (xdg-data-dirs)))
+  "List of directories to search for dictionaries.
+Given a dictionary NAME, we expect to find files NAME.aff and NAME.dic
+in one of those directories."
+  :type '(repeat directory))
+
+(defcustom vibe-spell-personal-dictionary-format
+  (list (expand-file-name "vibe-spell/%s" user-emacs-directory)
+        (expand-file-name "~/hunspell_%s"))
+  "Name pattern of personal directories.
+Each string is passed to `format' with the dictionary name as argument.
+The first file to be found is used to save additional words.  If none of
+the files exist, create one from the first item of the list."
+  :type '(choice string (repeat string)))
+
+;;; Public API
+
+(defun vibe-spell-create (dict)
+  "Create a spell checker object for dictionary DICT.
+DICT is a dictionary name, such as \"en_US\"; the files DICT.aff and
+DICT.dic are looked up under `vibe-spell-dictionary-path'.
+
+This only supports checking; see `vibe-spell-check'.  Suggestions
+\(`vibe-spell-suggest') are not implemented.  See the Commentary at
+the top of this file for the limitations of this port.
+
+Additional words accepted via `vibe-spell-add-word' in a past session
+are loaded from the personal dictionary file named by
+`vibe-spell-personal-dictionary-format', if it exists."
+  (let* ((base (-find-dictionary-base dict))
+         (aff-file (concat base ".aff"))
+         (dic-file (concat base ".dic")))
+    (let ((d (-dict-create))
+          ;; Loading briefly allocates a lot (the words table, flag
+          ;; lists, ...); let it run without GC interrupting partway.
+          (gc-cons-threshold most-positive-fixnum))
+      (-parse-aff d aff-file)
+      (when (-dict-complex-prefixes d)
+        (error "vibe-spell: %s uses COMPLEXPREFIXES, which is not supported" dict))
+      (-parse-dic d dic-file)
+      (-init-personal-dictionary d dict)
+      d)))
+
+(defun vibe-spell-check (dict word)
+  "Return non-nil if WORD is spelled correctly according to DICT.
+DICT is a spell checker object created by `vibe-spell-create'."
+  (or (length> word 100) (-spell dict word)))
+
+(defun vibe-spell-suggest (_dict _word)
+  "Return a list of corrections for WORD based on DICT."
+  (error "vibe-spell-suggest is not yet implemented"))
+
+(defun vibe-spell-add-word (dict word &optional save)
+  "Add WORD to DICT, and optionally SAVE to personal dictionary file.
+DICT is a spell checker object created by `vibe-spell-create'.  When
+SAVE is non-nil, also append WORD to DICT's personal dictionary file
+\(see `vibe-spell-personal-dictionary-format'), creating it if needed,
+so that it is picked up again by a later `vibe-spell-create'."
+  (-dict-add-word dict word nil)
+  (when save
+    (-save-personal-word (-dict-pdict dict) word)))
+
+;;; Implementation
+
+;;;; Helpers
 
 (defmacro -dolist-until (spec &rest body)
   "Like `dolist', but stop when BODY first evaluates to a non-nil value.
@@ -95,8 +172,20 @@ return the last body value.
                          (cdr ,tail))))
        ,result)))
 
-(defvar vibe-spell-dictionary-path "/usr/share/hunspell/"
-  "Directory to look for dictionaries.")
+(defun -find-dictionary-base (name)
+  "Return the path, sans extension, of dictionary NAME.
+Searches `vibe-spell-dictionary-path' for the first directory
+containing both a readable NAME.aff and a readable NAME.dic, and
+returns that directory's `expand-file-name' of NAME.  Signals an
+error if no directory in the list has both files."
+  (or (-dolist-until (dir vibe-spell-dictionary-path)
+        (let ((base (expand-file-name name dir)))
+          (and (file-readable-p (concat base ".aff"))
+               (file-readable-p (concat base ".dic"))
+               base)))
+      (user-error "\
+vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
+             name name)))
 
 (defconst -hidden-homonym-flag -1
   "Sentinel flag marking a dictionary entry as hidden from direct lookup.
@@ -112,6 +201,7 @@ Mirrors Nuspell's `Aff_Data::HIDDEN_HOMONYM_FLAG'.  See `-dict-add-word'.")
 
 (cl-defstruct (-dict (:constructor -dict-create))
   (words nil)                          ; hash-table: word -> list of flag lists
+  (pdict nil)                          ; personal dictionary file name
   (prefix-table nil)                   ; sorted vector of (KEY . `-prefix'), KEY = appending
   (suffix-table nil)                   ; sorted vector of (KEY . `-suffix'), KEY = (reverse appending)
   (compound-rules nil)                 ; list of patterns; pattern = list of (flag . quant)
@@ -159,8 +249,11 @@ the affix file's FLAG directive (default `single-char')."
     ('long
      (when (oddp (length str))
        (error "vibe-spell: odd number of characters in long flags %S" str))
-     (cl-loop for i from 0 below (length str) by 2
-              collect (logior (ash (aref str i) 8) (aref str (1+ i)))))
+     (let ((i 0) (n (length str)) result)
+       (while (< i n)
+         (push (logior (ash (aref str i) 8) (aref str (1+ i))) result)
+         (setq i (+ i 2)))
+       (nreverse result)))
     ('num
      (mapcar #'string-to-number (split-string str ",")))
     (_ (error "vibe-spell: unknown flag type %S" flag-type))))
@@ -245,7 +338,7 @@ expression."
    ((integerp spec) (eq spec ch))
    ((consp spec)
     (let ((negated (car spec)) (chars (cdr spec)))
-      (if negated (not (cl-find ch chars)) (and (cl-find ch chars) t))))))
+      (if negated (not (cl-position ch chars)) (and (cl-position ch chars) t))))))
 
 (defun -condition-match-prefix (specs word)
   "Return non-nil if WORD's first (length SPECS) characters match SPECS."
@@ -922,7 +1015,7 @@ entirely."
     (let (result)
       (dotimes (i (length s))
         (let ((c (aref s i)))
-          (unless (cl-find c chars) (push c result))))
+          (unless (cl-position c chars) (push c result))))
       (concat (nreverse result)))))
 
 (defun -string-last-non-dot (s)
@@ -1261,42 +1354,40 @@ and \"$\", are dropped, matching Nuspell's `Break_Table::order_entries'."
             (-compute-compound-rules-all-flags (-dict-compound-rules dict)))
       (setf (-dict-flag-aliases dict) (vconcat (nreverse flag-aliases))))))
 
-;;;; Public API
+;;;; Personal dictionary
 
-(defun vibe-spell-create (dict)
-  "Create a spell checker object for dictionary DICT.
-DICT is a dictionary name, such as \"en_US\"; the files DICT.aff and
-DICT.dic are looked up under `vibe-spell-dictionary-path'.
+(defun -personal-dictionary-file (name)
+  "Return the personal dictionary file to use for dictionary NAME.
+See `vibe-spell-personal-dictionary-format': this is the first file
+named by it that exists, or, if none exists, the file named by its
+first element."
+  (let ((formats (ensure-list vibe-spell-personal-dictionary-format)))
+    (or (-dolist-until (fmt formats)
+          (let ((file (format fmt name)))
+            (and (file-exists-p file) file)))
+        (format (car formats) name))))
 
-This only supports checking; see `vibe-spell-check'.  Suggestions
-\(`vibe-spell-suggest') are not implemented.  See the Commentary at
-the top of this file for the limitations of this port."
-  (let* ((base (expand-file-name dict vibe-spell-dictionary-path))
-         (aff-file (concat base ".aff"))
-         (dic-file (concat base ".dic")))
-    (unless (file-readable-p aff-file)
-      (error "vibe-spell: cannot read %s" aff-file))
-    (unless (file-readable-p dic-file)
-      (error "vibe-spell: cannot read %s" dic-file))
-    (let ((d (-dict-create))
-          ;; Loading briefly allocates a lot (the words table, flag
-          ;; lists, ...); let it run without GC interrupting partway.
-          (gc-cons-threshold most-positive-fixnum))
-      (-parse-aff d aff-file)
-      (when (-dict-complex-prefixes d)
-        (error "vibe-spell: %s uses COMPLEXPREFIXES, which is not supported" dict))
-      (-parse-dic d dic-file)
-      d)))
+(defun -init-personal-dictionary (dict name)
+  "Set up DICT's personal dictionary, and load any words already in it.
+NAME is the dictionary name passed to `vibe-spell-create'."
+  (let ((file (-personal-dictionary-file name)))
+    (setf (-dict-pdict dict) file)
+    (when (file-readable-p file)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (goto-char (point-min))
+        (while (not (eobp))
+          (let ((word (-chomp-cr (buffer-substring-no-properties
+                                  (pos-bol) (pos-eol)))))
+            (unless (string-empty-p word)
+              (-dict-add-word dict word nil)))
+          (forward-line 1))))))
 
-(defun vibe-spell-check (dict word)
-  "Return non-nil if WORD is spelled correctly according to DICT.
-DICT is a spell checker object created by `vibe-spell-create'."
-  (and (<= (length word) 360)
-       (-spell dict word)))
-
-(defun vibe-spell-suggest (_dict _word)
-  "Return a list of corrections for WORD based on DICT."
-  (error "vibe-spell-suggest is not yet implemented"))
+(defun -save-personal-word (file word)
+  "Append WORD as a new line to personal dictionary FILE.
+FILE, and its parent directory, are created if they do not exist yet."
+  (make-directory (file-name-directory file) t)
+  (write-region (concat word "\n") nil file t))
 
 ;; Local Variables:
 ;; read-symbol-shorthands: (("-" . "vibe-spell--"))

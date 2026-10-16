@@ -6,3 +6,4 @@
 - Instead of `(zerop (length s))`, use `string-empty-p`.
 - Prefer `pcase` over `cl-case`, `dolist` and variations over simple `cl-loop`.
 - Make sure to byte-compile code being benchmarked.
+- nuspell and hunspell sources are available in this directory for your reference.

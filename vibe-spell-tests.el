@@ -100,7 +100,7 @@ NAME is looked up as NAME.aff/NAME.dic/NAME.good/NAME.wrong under
 or (STATUS . MESSAGE) where STATUS is `skip' (`vibe-spell-create'
 itself failed) or `fail' (some word was misclassified)."
   (cl-block nil
-    (let ((vibe-spell-dictionary-path vibe-spell-tests-hunspell-dir)
+    (let ((vibe-spell-dictionary-path (list vibe-spell-tests-hunspell-dir))
           (good-file (expand-file-name (concat name ".good") vibe-spell-tests-hunspell-dir))
           (wrong-file (expand-file-name (concat name ".wrong") vibe-spell-tests-hunspell-dir))
           (dict nil))
@@ -189,6 +189,36 @@ not finish within `vibe-spell-tests-timeout'."
            t))))))
 
 (vibe-spell-tests--define-hunspell-tests)
+
+;;;; Personal dictionary
+
+(ert-deftest vibe-spell-test-personal-dictionary ()
+  "Check `vibe-spell-add-word' and its interaction with `vibe-spell-create'.
+A word added without saving is usable right away but forgotten by a
+later `vibe-spell-create'; one added with SAVE is both usable right
+away and, because it ends up in the personal dictionary file, still
+known to a later `vibe-spell-create'."
+  (let* ((tmpdir (make-temp-file "vibe-spell-test-pdict-" t))
+         (vibe-spell-dictionary-path (list vibe-spell-tests-hunspell-dir))
+         (vibe-spell-personal-dictionary-format (expand-file-name "personal-%s" tmpdir))
+         (pdict-file (format vibe-spell-personal-dictionary-format "base")))
+    (unwind-protect
+        (progn
+          (let ((dict (vibe-spell-create "base")))
+            (should-not (vibe-spell-check dict "loooked"))
+            (should-not (vibe-spell-check dict "zyzzyva"))
+            (vibe-spell-add-word dict "loooked")
+            (should (vibe-spell-check dict "loooked"))
+            (should-not (file-exists-p pdict-file))
+            (vibe-spell-add-word dict "zyzzyva" t)
+            (should (vibe-spell-check dict "zyzzyva"))
+            (should (file-exists-p pdict-file)))
+          (let ((dict (vibe-spell-create "base")))
+            (should-not (vibe-spell-check dict "loooked"))
+            (should (vibe-spell-check dict "zyzzyva"))
+            (should (vibe-spell-check dict "created"))
+            (should-not (vibe-spell-check dict "texxt"))))
+      (delete-directory tmpdir t))))
 
 (provide 'vibe-spell-tests)
 ;;; vibe-spell-tests.el ends here
