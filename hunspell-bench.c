@@ -50,6 +50,23 @@ is_word_char(wchar_t wc)
 	return iswalpha((wint_t)wc) || wc == L'\'' || wc == L'-';
 }
 
+/* Check WORD (WLEN bytes, UTF-8), converting it to the dictionary's
+ * own encoding via CD first unless CD is (iconv_t)-1 (dictionary is
+ * already UTF-8).  Return non-zero if Hunspell considers it correct. */
+static int
+check_word(Hunhandle *h, iconv_t cd, char *word, size_t wlen)
+{
+	word[wlen] = '\0';
+	if (cd == (iconv_t)-1)
+		return Hunspell_spell(h, word);
+	char converted[1024];
+	char *in = word, *out = converted;
+	size_t inleft = wlen, outleft = sizeof converted - 1;
+	iconv(cd, &in, &inleft, &out, &outleft);
+	*out = '\0';
+	return Hunspell_spell(h, converted);
+}
+
 /* Read FILE fully into a NUL-terminated buffer; set *SIZE to its
  * length (not counting the added NUL).  Exits the program on error. */
 static char *
@@ -127,11 +144,11 @@ main(int argc, char **argv)
 	 * collected into a list. */
 	t0 = now();
 	long word_count = 0;
+	long correct_count = 0;
 	mbstate_t mbs;
 	memset(&mbs, 0, sizeof mbs);
 	char *p = buf, *end = buf + file_size;
 	char word[1024];
-	char converted[1024];
 	size_t wlen = 0;
 	while (p < end) {
 		wchar_t wc;
@@ -150,40 +167,25 @@ main(int argc, char **argv)
 				wlen += n;
 			}
 		} else if (wlen > 0) {
-			word[wlen] = '\0';
 			word_count++;
-			if (cd == (iconv_t)-1) {
-				Hunspell_spell(h, word);
-			} else {
-				char *in = word, *out = converted;
-				size_t inleft = wlen, outleft = sizeof converted - 1;
-				iconv(cd, &in, &inleft, &out, &outleft);
-				*out = '\0';
-				Hunspell_spell(h, converted);
-			}
+			if (check_word(h, cd, word, wlen))
+				correct_count++;
 			wlen = 0;
 		}
 		p += n;
 	}
 	if (wlen > 0) {
-		word[wlen] = '\0';
 		word_count++;
-		if (cd == (iconv_t)-1) {
-			Hunspell_spell(h, word);
-		} else {
-			char *in = word, *out = converted;
-			size_t inleft = wlen, outleft = sizeof converted - 1;
-			iconv(cd, &in, &inleft, &out, &outleft);
-			*out = '\0';
-			Hunspell_spell(h, converted);
-		}
+		if (check_word(h, cd, word, wlen))
+			correct_count++;
 	}
 	double check_seconds = now() - t0;
 
-	printf("hunspell-bench:    %ld words from %s\n", word_count, file_path);
-	printf("load dict:         %.3fs\n", load_seconds);
-	printf("check:             %.3fs (%.0f words/s)\n",
-	       check_seconds, word_count / check_seconds);
+	printf("benchmark:  hunspell %s %s\n", dict_name, file_path);
+	printf("load dict:  %.3fs\n", load_seconds);
+	printf("check:      %ld words, %ld correct\n", word_count, correct_count);
+	printf("            %.3fs total\n", check_seconds);
+	printf("            %.3fK words/s,\n", word_count / check_seconds / 1000.0);
 
 	if (cd != (iconv_t)-1)
 		iconv_close(cd);

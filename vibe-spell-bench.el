@@ -54,33 +54,58 @@
 ;; This is a batch-only, noninteractive script.  Run with, e.g.:
 ;;   emacs -batch -L . -l vibe-spell-bench.el -f vibe-spell-bench-run \
 ;;         en_US hunspell/tests/suggestiontest/List_of_common_misspellings.txt
+;;
+;; Unless `native-comp-eln-load-path' is nil (e.g. because the caller
+;; cleared it to force a pure byte-compiled measurement), this makes
+;; sure vibe-spell.el is actually running native-compiled code first,
+;; synchronously native-compiling (and reloading) it if it is not --
+;; useful since plain `emacs -batch -l vibe-spell-bench.el' only ever
+;; runs byte-compiled code unless a matching .eln happens to already
+;; sit in the native-comp cache.  Either way, which one it ran with is
+;; reported in the first line of the output.
 
 ;;; Code:
 
 (require 'benchmark)
 (require 'vibe-spell)
 
+(defconst vibe-spell-bench--project-dir
+  (file-name-directory (or load-file-name buffer-file-name default-directory))
+  "Directory containing vibe-spell.el and vibe-spell-bench.el.")
+
+(defun vibe-spell-bench--ensure-native ()
+  "Make sure vibe-spell.el runs native-compiled, unless the caller
+disabled native compilation by setting `native-comp-eln-load-path' to
+nil, in which case this does nothing."
+  (when (and native-comp-eln-load-path
+             (not (native-comp-function-p (symbol-function 'vibe-spell-check))))
+    (if (native-comp-available-p)
+        (load (native-compile (expand-file-name "vibe-spell.el" vibe-spell-bench--project-dir)))
+      (error "vibe-spell-bench: native compilation is not available"))))
+
 (defun vibe-spell-bench-run (&optional dict-name file)
-  "Benchmark loading dictionary DICT-NAME and checking FILE's words,
-alongside the external hunspell(1) binary: checking the same file,
-and separately, on /dev/null, merely starting up and loading the
-dictionary.  All three use DICT-NAME.
+  "Benchmark loading dictionary DICT-NAME and checking FILE's words.
 
 DICT-NAME and FILE default to the first two leftover command-line
 arguments, for use as `emacs -batch -l vibe-spell-bench.el -f
 vibe-spell-bench-run DICT-NAME FILE'.  This function is noninteractive
 -- it is meant to be run this way, not via \\[execute-extended-command].
 
-Return and (via `message') report (WORD-COUNT LOAD-SECONDS LOAD-GCS
-LOAD-GC-SECONDS CHECK-SECONDS CHECK-GCS CHECK-GC-SECONDS
-HUNSPELL-SECONDS HUNSPELL-STARTUP-SECONDS); the *-SECONDS/-GCS/-GC-
-SECONDS triples are as produced by `benchmark-run'."
+Unless `native-comp-eln-load-path' is nil, this ensures vibe-spell.el
+runs native-compiled before benchmarking it; see the Commentary above.
+
+Return and (via `message') report (WORD-COUNT CORRECT-COUNT
+LOAD-SECONDS LOAD-GCS LOAD-GC-SECONDS CHECK-SECONDS CHECK-GCS
+CHECK-GC-SECONDS); the *-SECONDS/-GCS/-GC-SECONDS triples are as
+produced by `benchmark-run'."
   (let ((dict-name (or dict-name (pop command-line-args-left)
-                        (error "vibe-spell-bench-run: no dictionary name given")))
+                        (error "vibe-spell-bench: no dictionary name given")))
         (file (or file (pop command-line-args-left)
-                   (error "vibe-spell-bench-run: no word-list file given")))
+                   (error "vibe-spell-bench: no word-list file given")))
         (dict nil)
-        (word-count 0))
+        (word-count 0)
+        (correct-count 0))
+    (vibe-spell-bench--ensure-native)
     (pcase-let*
         ((`(,load-seconds ,load-gcs ,load-gc-seconds)
           (benchmark-run (setq dict (vibe-spell-create dict-name))))
@@ -91,16 +116,25 @@ SECONDS triples are as produced by `benchmark-run'."
             (benchmark-run
              (while (re-search-forward (rx (one-or-more (any alpha ?' ?-))) nil t)
                (setq word-count (1+ word-count))
-               (vibe-spell-check dict (match-string-no-properties 0)))))))
+               (when (vibe-spell-check dict (match-string-no-properties 0))
+                 (setq correct-count (1+ correct-count))))))))
       (message "\
-vibe-spell-bench:  %d words from %s
-load dict:         %.3fs (%d GCs taking %.3fs)
-check:             %.3fs (%.0f words/s), %d GCs taking %.3fs
+benchmark:  %s %s %s
+load dict:  %.3fs, %d GCs taking %.3fs
+check:      %d words, %d correct
+            %.3fs total, %d GCs taking %.3fs
+            %.3fK words/s,
 "
-               word-count file
+               (if (native-comp-function-p (symbol-function 'vibe-spell-check))
+                   "native"
+                 "bytecomp")
+               dict-name file
                load-seconds load-gcs load-gc-seconds
-               check-seconds (/ word-count check-seconds)
-               check-gcs check-gc-seconds))))
+               word-count correct-count
+               check-seconds check-gcs check-gc-seconds
+               (/ (/ word-count check-seconds) 1000.0))
+      (list word-count correct-count load-seconds load-gcs load-gc-seconds
+            check-seconds check-gcs check-gc-seconds))))
 
 (provide 'vibe-spell-bench)
 ;;; vibe-spell-bench.el ends here

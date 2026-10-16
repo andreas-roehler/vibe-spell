@@ -69,6 +69,32 @@
 
 (require 'cl-lib)
 
+(defmacro -dolist-until (spec &rest body)
+  "Like `dolist', but stop when BODY first evaluates to a non-nil value.
+When that happens, evaluate RESULT and return it.  If RESULT is omitted,
+return the last body value.
+
+\(fn (VAR LIST [RESULT]) BODY...)"
+  (declare (indent 1) (debug ((symbolp form &optional form) body)))
+  (unless (consp spec)
+    (signal 'wrong-type-argument (list 'consp spec)))
+  (unless (<= 2 (length spec) 3)
+    (signal 'wrong-number-of-arguments (list '(2 . 3) (length spec))))
+  (let ((var (car spec))
+        (tail (make-symbol "tail"))
+        (result (make-symbol "result")))
+    `(let ((,tail ,(nth 1 spec)) ,var ,result)
+       (while ,tail
+         (setq ,var (car ,tail))
+         (setq ,result ,(macroexp-progn body))
+         (setq ,tail (if ,result
+                         ,(when (length= spec 3)
+                            `(progn
+                               (setq ,result ,(macroexp-progn (cddr spec)))
+                               nil))
+                         (cdr ,tail))))
+       ,result)))
+
 (defvar vibe-spell-dictionary-path "/usr/share/hunspell/"
   "Directory to look for dictionaries.")
 
@@ -306,16 +332,15 @@ by `-build-affix-table'.  This mirrors Nuspell's
 and testing each key against PROBE directly, it narrows a candidate
 range of TABLE one character of PROBE at a time, via binary search,
 collecting a match whenever a candidate's key is fully consumed."
-  (let ((lo 0) (hi (length table)) (len 0) (plen (length probe)) result)
-    (catch '-affix-table-matches
-      (while t
-        ;; TABLE[lo,hi) all share key[0..len) == probe[0..len); yield
-        ;; those whose key is now exactly that (nothing left to match).
-        (while (and (< lo hi) (= (length (car (aref table lo))) len))
-          (push (cdr (aref table lo)) result)
-          (setq lo (1+ lo)))
-        (when (or (>= lo hi) (= len plen))
-          (throw '-affix-table-matches nil))
+  (let ((lo 0) (hi (length table)) (len 0) (plen (length probe)) (done nil) result)
+    (while (not done)
+      ;; TABLE[lo,hi) all share key[0..len) == probe[0..len); yield
+      ;; those whose key is now exactly that (nothing left to match).
+      (while (and (< lo hi) (= (length (car (aref table lo))) len))
+        (push (cdr (aref table lo)) result)
+        (setq lo (1+ lo)))
+      (if (or (>= lo hi) (= len plen))
+          (setq done t)
         ;; Narrow [lo,hi) to the entries whose next character, at
         ;; POS=len, matches PROBE's; everything in it now has a key
         ;; longer than LEN, so that character is always there.
@@ -420,38 +445,34 @@ without ever building that root string; see
 ;; `-check-simple-word'), matching Nuspell's own usage.
 
 (defun -strip-suffix-only (dict mode word skip-hidden)
-  (catch '-strip-suffix-only
-    (dolist (se (-iterate-suffixes-of dict word))
-      (unless (or (-outer-suffix-not-valid-p dict mode se)
-                  (-circumfix-flags-p dict (-suffix-cont-flags se)))
-        (when (-suffix-condition-matches-p se word)
-          (let* ((root (-suffix-to-root se word)))
-            (dolist (flags (gethash root (-dict-words dict)))
-              (when (and (-cross-valid-p flags (-suffix-flag se))
-                         (not (and (eq mode :full-word)
-                                   (-flags-contain flags (-dict-compound-onlyin-flag dict))))
-                         (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
-                         (or (-valid-inside-compound-p dict mode flags)
-                             (-valid-inside-compound-p dict mode (-suffix-cont-flags se))))
-                (throw '-strip-suffix-only (cons root flags))))))))
-    nil))
+  (-dolist-until (se (-iterate-suffixes-of dict word))
+    (and (not (or (-outer-suffix-not-valid-p dict mode se)
+                  (-circumfix-flags-p dict (-suffix-cont-flags se))))
+         (-suffix-condition-matches-p se word)
+         (let ((root (-suffix-to-root se word)))
+           (-dolist-until (flags (gethash root (-dict-words dict)))
+             (and (-cross-valid-p flags (-suffix-flag se))
+                  (not (and (eq mode :full-word)
+                            (-flags-contain flags (-dict-compound-onlyin-flag dict))))
+                  (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                  (or (-valid-inside-compound-p dict mode flags)
+                      (-valid-inside-compound-p dict mode (-suffix-cont-flags se)))
+                  (cons root flags)))))))
 
 (defun -strip-prefix-only (dict mode word skip-hidden)
-  (catch '-strip-prefix-only
-    (dolist (pe (-iterate-prefixes-of dict word))
-      (unless (or (-outer-prefix-not-valid-p dict mode pe)
-                  (-circumfix-flags-p dict (-prefix-cont-flags pe)))
-        (when (-prefix-condition-matches-p pe word)
-          (let* ((root (-prefix-to-root pe word)))
-            (dolist (flags (gethash root (-dict-words dict)))
-              (when (and (-cross-valid-p flags (-prefix-flag pe))
-                         (not (and (eq mode :full-word)
-                                   (-flags-contain flags (-dict-compound-onlyin-flag dict))))
-                         (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
-                         (or (-valid-inside-compound-p dict mode flags)
-                             (-valid-inside-compound-p dict mode (-prefix-cont-flags pe))))
-                (throw '-strip-prefix-only (cons root flags))))))))
-    nil))
+  (-dolist-until (pe (-iterate-prefixes-of dict word))
+    (and (not (or (-outer-prefix-not-valid-p dict mode pe)
+                  (-circumfix-flags-p dict (-prefix-cont-flags pe))))
+         (-prefix-condition-matches-p pe word)
+         (let ((root (-prefix-to-root pe word)))
+           (-dolist-until (flags (gethash root (-dict-words dict)))
+             (and (-cross-valid-p flags (-prefix-flag pe))
+                  (not (and (eq mode :full-word)
+                            (-flags-contain flags (-dict-compound-onlyin-flag dict))))
+                  (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                  (or (-valid-inside-compound-p dict mode flags)
+                      (-valid-inside-compound-p dict mode (-prefix-cont-flags pe)))
+                  (cons root flags)))))))
 
 (defun -strip-prefix-then-suffix-commutative (dict mode word skip-hidden)
   "Strip one prefix and one suffix, in either order.
@@ -459,31 +480,27 @@ A derived word formed as prefix+root+suffix can have been built by
 adding either affix first, as long as the other one's flag allows
 cross-product with it; this checks both directions at once, as
 Nuspell's \"commutative\" variant does."
-  (catch '-strip-prefix-then-suffix-commutative
-    (dolist (pe (-iterate-prefixes-of dict word))
-      (when (and (-prefix-cross-product pe)
-                 (not (-prefix-not-valid-p dict mode pe)))
-        (when (-prefix-condition-matches-p pe word)
-          (let* ((root1 (-prefix-to-root pe word))
-                 (r (-strip-pfx-then-sfx-comm-2 dict mode pe root1 skip-hidden)))
-            (when r (throw '-strip-prefix-then-suffix-commutative r))))))
-    nil))
+  (-dolist-until (pe (-iterate-prefixes-of dict word))
+    (and (-prefix-cross-product pe)
+         (not (-prefix-not-valid-p dict mode pe))
+         (-prefix-condition-matches-p pe word)
+         (let ((root1 (-prefix-to-root pe word)))
+           (-strip-pfx-then-sfx-comm-2 dict mode pe root1 skip-hidden)))))
 
 (defun -strip-pfx-then-sfx-comm-2 (dict mode pe word skip-hidden)
-  (catch '-strip-pfx-then-sfx-comm-2
-    (let* ((pe-cont (-prefix-cont-flags pe))
-           (has-needaffix-pe (-flags-contain pe-cont (-dict-need-affix-flag dict)))
-           (circumfix-pe (-circumfix-flags-p dict pe-cont)))
-      (dolist (se (-iterate-suffixes-of dict word))
-        (when (and (-suffix-cross-product se)
-                   (not (-suffix-not-valid-p dict mode se)))
-          (let* ((se-cont (-suffix-cont-flags se))
-                 (has-needaffix-se (-flags-contain se-cont (-dict-need-affix-flag dict))))
-            (unless (and has-needaffix-pe has-needaffix-se)
-              (when (eq circumfix-pe (-circumfix-flags-p dict se-cont))
-                (when (-suffix-condition-matches-p se word)
-                  (let* ((root (-suffix-to-root se word)))
-                    (dolist (flags (gethash root (-dict-words dict)))
+  (let* ((pe-cont (-prefix-cont-flags pe))
+         (has-needaffix-pe (-flags-contain pe-cont (-dict-need-affix-flag dict)))
+         (circumfix-pe (-circumfix-flags-p dict pe-cont)))
+    (-dolist-until (se (-iterate-suffixes-of dict word))
+      (and (-suffix-cross-product se)
+           (not (-suffix-not-valid-p dict mode se))
+           (let* ((se-cont (-suffix-cont-flags se))
+                  (has-needaffix-se (-flags-contain se-cont (-dict-need-affix-flag dict))))
+             (and (not (and has-needaffix-pe has-needaffix-se))
+                  (eq circumfix-pe (-circumfix-flags-p dict se-cont))
+                  (-suffix-condition-matches-p se word)
+                  (let ((root (-suffix-to-root se word)))
+                    (-dolist-until (flags (gethash root (-dict-words dict)))
                       (let* ((valid-pe-outer
                               (and (not has-needaffix-pe)
                                    (-cross-valid-p flags (-suffix-flag se))
@@ -494,116 +511,100 @@ Nuspell's \"commutative\" variant does."
                                    (-cross-valid-p flags (-prefix-flag pe))
                                    (or (-cross-valid-p pe-cont (-suffix-flag se))
                                        (-cross-valid-p flags (-suffix-flag se))))))
-                        (when (and (or valid-pe-outer valid-se-outer)
-                                   (not (and (eq mode :full-word)
-                                             (-flags-contain flags (-dict-compound-onlyin-flag dict))))
-                                   (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
-                                   (or (-valid-inside-compound-p dict mode flags)
-                                       (-valid-inside-compound-p dict mode se-cont)
-                                       (-valid-inside-compound-p dict mode pe-cont)))
-                          (throw '-strip-pfx-then-sfx-comm-2 (cons root flags)))))))))))))
-    nil))
+                        (and (or valid-pe-outer valid-se-outer)
+                             (not (and (eq mode :full-word)
+                                       (-flags-contain flags (-dict-compound-onlyin-flag dict))))
+                             (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                             (or (-valid-inside-compound-p dict mode flags)
+                                 (-valid-inside-compound-p dict mode se-cont)
+                                 (-valid-inside-compound-p dict mode pe-cont))
+                             (cons root flags)))))))))))
 
 (defun -strip-suffix-then-suffix (dict word skip-hidden)
-  (catch '-strip-suffix-then-suffix
-    (dolist (se1 (-iterate-suffixes-of dict word))
-      (unless (or (-outer-suffix-not-valid-p dict :full-word se1)
-                  (-circumfix-flags-p dict (-suffix-cont-flags se1)))
-        (when (-suffix-condition-matches-p se1 word)
-          (let* ((root1 (-suffix-to-root se1 word))
-                 (r (-strip-sfx-then-sfx-2 dict se1 root1 skip-hidden)))
-            (when r (throw '-strip-suffix-then-suffix r))))))
-    nil))
+  (-dolist-until (se1 (-iterate-suffixes-of dict word))
+    (and (not (or (-outer-suffix-not-valid-p dict :full-word se1)
+                  (-circumfix-flags-p dict (-suffix-cont-flags se1))))
+         (-suffix-condition-matches-p se1 word)
+         (let ((root1 (-suffix-to-root se1 word)))
+           (-strip-sfx-then-sfx-2 dict se1 root1 skip-hidden)))))
 
 (defun -strip-sfx-then-sfx-2 (dict se1 word skip-hidden)
-  (catch '-strip-sfx-then-sfx-2
-    (dolist (se2 (-iterate-suffixes-of dict word))
-      (when (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
-        (unless (or (-suffix-not-valid-p dict :full-word se2)
-                    (-circumfix-flags-p dict (-suffix-cont-flags se2)))
-          (when (-suffix-condition-matches-p se2 word)
-            (let* ((root (-suffix-to-root se2 word)))
-              (dolist (flags (gethash root (-dict-words dict)))
-                (when (and (-cross-valid-p flags (-suffix-flag se2))
-                           (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
-                           (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag))))
-                  (throw '-strip-sfx-then-sfx-2 (cons root flags)))))))))
-    nil))
+  (-dolist-until (se2 (-iterate-suffixes-of dict word))
+    (and (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
+         (not (or (-suffix-not-valid-p dict :full-word se2)
+                  (-circumfix-flags-p dict (-suffix-cont-flags se2))))
+         (-suffix-condition-matches-p se2 word)
+         (let ((root (-suffix-to-root se2 word)))
+           (-dolist-until (flags (gethash root (-dict-words dict)))
+             (and (-cross-valid-p flags (-suffix-flag se2))
+                  (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
+                  (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                  (cons root flags)))))))
 
 (defun -strip-prefix-then-2-suffixes (dict word skip-hidden)
-  (catch '-strip-prefix-then-2-suffixes
-    (dolist (pe1 (-iterate-prefixes-of dict word))
-      (when (and (-prefix-cross-product pe1)
-                 (not (-outer-prefix-not-valid-p dict :full-word pe1)))
-        (when (-prefix-condition-matches-p pe1 word)
-          (let ((root-p (-prefix-to-root pe1 word)))
-            (dolist (se1 (-iterate-suffixes-of dict root-p))
-              (when (and (-suffix-cross-product se1)
-                         (not (-suffix-not-valid-p dict :full-word se1))
-                         (eq (-circumfix-flags-p dict (-prefix-cont-flags pe1))
-                             (-circumfix-flags-p dict (-suffix-cont-flags se1))))
-                (when (-suffix-condition-matches-p se1 root-p)
-                  (let* ((root1 (-suffix-to-root se1 root-p))
-                         (r (-strip-pfx-2-sfx-3 dict pe1 se1 root1 skip-hidden)))
-                    (when r (throw '-strip-prefix-then-2-suffixes r))))))))))
-    nil))
+  (-dolist-until (pe1 (-iterate-prefixes-of dict word))
+    (and (-prefix-cross-product pe1)
+         (not (-outer-prefix-not-valid-p dict :full-word pe1))
+         (-prefix-condition-matches-p pe1 word)
+         (let ((root-p (-prefix-to-root pe1 word)))
+           (-dolist-until (se1 (-iterate-suffixes-of dict root-p))
+             (and (-suffix-cross-product se1)
+                  (not (-suffix-not-valid-p dict :full-word se1))
+                  (eq (-circumfix-flags-p dict (-prefix-cont-flags pe1))
+                      (-circumfix-flags-p dict (-suffix-cont-flags se1)))
+                  (-suffix-condition-matches-p se1 root-p)
+                  (let ((root1 (-suffix-to-root se1 root-p)))
+                    (-strip-pfx-2-sfx-3 dict pe1 se1 root1 skip-hidden))))))))
 
 (defun -strip-pfx-2-sfx-3 (dict pe1 se1 word skip-hidden)
-  (catch '-strip-pfx-2-sfx-3
-    (dolist (se2 (-iterate-suffixes-of dict word))
-      (when (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
-        (unless (or (-suffix-not-valid-p dict :full-word se2)
-                    (-circumfix-flags-p dict (-suffix-cont-flags se2)))
-          (when (-suffix-condition-matches-p se2 word)
-            (let* ((root (-suffix-to-root se2 word)))
-              (dolist (flags (gethash root (-dict-words dict)))
-                (when (and (or (-cross-valid-p (-suffix-cont-flags se1) (-prefix-flag pe1))
-                               (-cross-valid-p flags (-prefix-flag pe1)))
-                           (-cross-valid-p flags (-suffix-flag se2))
-                           (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
-                           (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag))))
-                  (throw '-strip-pfx-2-sfx-3 (cons root flags)))))))))
-    nil))
+  (-dolist-until (se2 (-iterate-suffixes-of dict word))
+    (and (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
+         (not (or (-suffix-not-valid-p dict :full-word se2)
+                  (-circumfix-flags-p dict (-suffix-cont-flags se2))))
+         (-suffix-condition-matches-p se2 word)
+         (let ((root (-suffix-to-root se2 word)))
+           (-dolist-until (flags (gethash root (-dict-words dict)))
+             (and (or (-cross-valid-p (-suffix-cont-flags se1) (-prefix-flag pe1))
+                      (-cross-valid-p flags (-prefix-flag pe1)))
+                  (-cross-valid-p flags (-suffix-flag se2))
+                  (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
+                  (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                  (cons root flags)))))))
 
 (defun -strip-suffix-prefix-suffix (dict word skip-hidden)
-  (catch '-strip-suffix-prefix-suffix
-    (dolist (se1 (-iterate-suffixes-of dict word))
-      (when (and (-suffix-cross-product se1)
-                 (not (-outer-suffix-not-valid-p dict :full-word se1)))
-        (when (-suffix-condition-matches-p se1 word)
-          (let ((root-s (-suffix-to-root se1 word)))
-            (dolist (pe1 (-iterate-prefixes-of dict root-s))
-              (when (and (-prefix-cross-product pe1)
-                         (not (-prefix-not-valid-p dict :full-word pe1)))
-                (when (-prefix-condition-matches-p pe1 root-s)
-                  (let* ((root1 (-prefix-to-root pe1 root-s))
-                         (r (-strip-s-p-s-3 dict se1 pe1 root1 skip-hidden)))
-                    (when r (throw '-strip-suffix-prefix-suffix r))))))))))
-    nil))
+  (-dolist-until (se1 (-iterate-suffixes-of dict word))
+    (and (-suffix-cross-product se1)
+         (not (-outer-suffix-not-valid-p dict :full-word se1))
+         (-suffix-condition-matches-p se1 word)
+         (let ((root-s (-suffix-to-root se1 word)))
+           (-dolist-until (pe1 (-iterate-prefixes-of dict root-s))
+             (and (-prefix-cross-product pe1)
+                  (not (-prefix-not-valid-p dict :full-word pe1))
+                  (-prefix-condition-matches-p pe1 root-s)
+                  (let ((root1 (-prefix-to-root pe1 root-s)))
+                    (-strip-s-p-s-3 dict se1 pe1 root1 skip-hidden))))))))
 
 (defun -strip-s-p-s-3 (dict se1 pe1 word skip-hidden)
-  (catch '-strip-s-p-s-3
-    (dolist (se2 (-iterate-suffixes-of dict word))
-      (when (and (-suffix-cross-product se2)
-                 (or (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
-                     (-cross-valid-p (-prefix-cont-flags pe1) (-suffix-flag se1))))
-        (unless (-suffix-not-valid-p dict :full-word se2)
-          (let* ((circ-pe1 (-circumfix-flags-p dict (-prefix-cont-flags pe1)))
-                 (circ-se1 (-circumfix-flags-p dict (-suffix-cont-flags se1)))
-                 (circ-se2 (-circumfix-flags-p dict (-suffix-cont-flags se2)))
-                 (ok1 (and (eq circ-pe1 circ-se1) (not circ-se2)))
-                 (ok2 (and (eq circ-pe1 circ-se2) (not circ-se1))))
-            (when (or ok1 ok2)
-              (when (-suffix-condition-matches-p se2 word)
-                (let* ((root (-suffix-to-root se2 word)))
-                  (dolist (flags (gethash root (-dict-words dict)))
-                    (when (and (or (-cross-valid-p (-suffix-cont-flags se2) (-prefix-flag pe1))
-                                   (-cross-valid-p flags (-prefix-flag pe1)))
-                               (-cross-valid-p flags (-suffix-flag se2))
-                               (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
-                               (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag))))
-                      (throw '-strip-s-p-s-3 (cons root flags)))))))))))
-    nil))
+  (-dolist-until (se2 (-iterate-suffixes-of dict word))
+    (and (-suffix-cross-product se2)
+         (or (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
+             (-cross-valid-p (-prefix-cont-flags pe1) (-suffix-flag se1)))
+         (not (-suffix-not-valid-p dict :full-word se2))
+         (let* ((circ-pe1 (-circumfix-flags-p dict (-prefix-cont-flags pe1)))
+                (circ-se1 (-circumfix-flags-p dict (-suffix-cont-flags se1)))
+                (circ-se2 (-circumfix-flags-p dict (-suffix-cont-flags se2)))
+                (ok1 (and (eq circ-pe1 circ-se1) (not circ-se2)))
+                (ok2 (and (eq circ-pe1 circ-se2) (not circ-se1))))
+           (and (or ok1 ok2)
+                (-suffix-condition-matches-p se2 word)
+                (let ((root (-suffix-to-root se2 word)))
+                  (-dolist-until (flags (gethash root (-dict-words dict)))
+                    (and (or (-cross-valid-p (-suffix-cont-flags se2) (-prefix-flag pe1))
+                             (-cross-valid-p flags (-prefix-flag pe1)))
+                         (-cross-valid-p flags (-suffix-flag se2))
+                         (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
+                         (not (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
+                         (cons root flags)))))))))
 
 ;;;; Simple (non-compound) word checking
 
@@ -611,53 +612,39 @@ Nuspell's \"commutative\" variant does."
   "Check WORD as a single (possibly affixed) dictionary entry.
 Return (ROOT-WORD . FLAGS) or nil; see the affix-stripping functions
 above for the shape of the result."
-  (catch '-check-simple-word
-    (dolist (flags (gethash word (-dict-words dict)))
-      (unless (or (-flags-contain flags (-dict-need-affix-flag dict))
-                  (-flags-contain flags (-dict-compound-onlyin-flag dict))
-                  (and skip-hidden (-flags-contain flags -hidden-homonym-flag)))
-        (throw '-check-simple-word (cons word flags))))
-    (let ((r (-strip-suffix-only dict :full-word word skip-hidden)))
-      (when r (throw '-check-simple-word r)))
-    (let ((r (-strip-prefix-only dict :full-word word skip-hidden)))
-      (when r (throw '-check-simple-word r)))
-    (let ((r (-strip-prefix-then-suffix-commutative dict :full-word word skip-hidden)))
-      (when r (throw '-check-simple-word r)))
-    (let ((r (-strip-suffix-then-suffix dict word skip-hidden)))
-      (when r (throw '-check-simple-word r)))
-    (let ((r (-strip-prefix-then-2-suffixes dict word skip-hidden)))
-      (when r (throw '-check-simple-word r)))
-    (let ((r (-strip-suffix-prefix-suffix dict word skip-hidden)))
-      (when r (throw '-check-simple-word r)))
-    nil))
+  (or (-dolist-until (flags (gethash word (-dict-words dict)))
+        (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
+                      (-flags-contain flags (-dict-compound-onlyin-flag dict))
+                      (and skip-hidden (-flags-contain flags -hidden-homonym-flag))))
+             (cons word flags)))
+      (-strip-suffix-only dict :full-word word skip-hidden)
+      (-strip-prefix-only dict :full-word word skip-hidden)
+      (-strip-prefix-then-suffix-commutative dict :full-word word skip-hidden)
+      (-strip-suffix-then-suffix dict word skip-hidden)
+      (-strip-prefix-then-2-suffixes dict word skip-hidden)
+      (-strip-suffix-prefix-suffix dict word skip-hidden)))
 
 ;;;; Compound checking
 
 (defun -check-word-in-compound (dict mode word)
   "Check WORD as one part of a compound, in position MODE.
 MODE is :compound-begin, :compound-middle or :compound-end."
-  (catch '-check-word-in-compound
-    (let ((cpd-flag (cond ((eq mode :compound-begin) (-dict-compound-begin-flag dict))
-                           ((eq mode :compound-middle) (-dict-compound-middle-flag dict))
-                           ((eq mode :compound-end) (-dict-compound-last-flag dict))
-                           (t 0))))
-      (dolist (flags (gethash word (-dict-words dict)))
-        (unless (or (-flags-contain flags (-dict-need-affix-flag dict))
-                    (not (or (-flags-contain flags (-dict-compound-flag dict))
-                             (-flags-contain flags cpd-flag)))
-                    (-flags-contain flags -hidden-homonym-flag))
-          (throw '-check-word-in-compound (cons word flags)))))
-    (let ((r (-strip-suffix-only dict mode word t)))
-      (when r (throw '-check-word-in-compound r)))
-    (let ((r (-strip-prefix-only dict mode word t)))
-      (when r (throw '-check-word-in-compound r)))
-    (let ((r (-strip-prefix-then-suffix-commutative dict mode word t)))
-      (when r (throw '-check-word-in-compound r)))
-    nil))
+  (let ((cpd-flag (cond ((eq mode :compound-begin) (-dict-compound-begin-flag dict))
+                         ((eq mode :compound-middle) (-dict-compound-middle-flag dict))
+                         ((eq mode :compound-end) (-dict-compound-last-flag dict))
+                         (t 0))))
+    (or (-dolist-until (flags (gethash word (-dict-words dict)))
+          (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
+                        (not (or (-flags-contain flags (-dict-compound-flag dict))
+                                 (-flags-contain flags cpd-flag)))
+                        (-flags-contain flags -hidden-homonym-flag)))
+               (cons word flags)))
+        (-strip-suffix-only dict mode word t)
+        (-strip-prefix-only dict mode word t)
+        (-strip-prefix-then-suffix-commutative dict mode word t))))
 
-(defun -char-alpha-p (ch)
-  (eq (string-match-p "[[:alpha:]]" (string ch)) 0))
-
+(defun -char-alpha-p (ch) (memq (get-char-code-property ch 'general-category)
+                                 '(Ll Lu Lo Lm Lt)))
 (defun -char-upper-p (ch) (/= ch (downcase ch)))
 (defun -char-lower-p (ch) (/= ch (upcase ch)))
 
@@ -681,66 +668,51 @@ MODE is :compound-begin, :compound-middle or :compound-end."
 Returns the dictionary entry (ROOT-WORD . FLAGS) for the first part on
 success, or nil.  MODE is :compound-begin or :compound-middle,
 matching the position of the first part."
-  (catch '-check-compound-classic
-    (let* ((part1-text (substring word start-pos i))
-           (part1-entry (-check-word-in-compound dict mode part1-text)))
-      (unless part1-entry (throw '-check-compound-classic nil))
-      (when (-flags-contain (cdr part1-entry) (-dict-forbiddenword-flag dict))
-        (throw '-check-compound-classic nil))
-      (when (and (-dict-compound-check-triple dict) (-three-equal-at-boundary-p word i))
-        (throw '-check-compound-classic nil))
-      (when (and (-dict-compound-check-case dict) (-uppercase-at-compound-boundary-p word i))
-        (throw '-check-compound-classic nil))
-      (let* ((root-flag (-dict-compound-root-flag dict))
-             (num-part1 (+ num-part (if (-flags-contain (cdr part1-entry) root-flag) 1 0)))
-             (part2-text (substring word i))
-             (part2-entry (-check-word-in-compound dict :compound-end part2-text))
-             (success2
-              (and part2-entry
-                   (not (-flags-contain (cdr part2-entry) (-dict-forbiddenword-flag dict)))
-                   (not (and (-dict-compound-check-duplicate dict)
-                             (eq (cdr part1-entry) (cdr part2-entry))))
-                   (not (and (/= 0 (-dict-compound-force-uppercase dict))
-                             (not allow-bad-forceucase)
-                             (-flags-contain (cdr part2-entry) (-dict-compound-force-uppercase dict)))))))
-        (if success2
-            (let ((num-part2 (+ num-part1 (if (-flags-contain (cdr part2-entry) root-flag) 1 0))))
-              (if (and (/= 0 (-dict-compound-max-word-count dict))
-                       (>= (1+ num-part2) (-dict-compound-max-word-count dict)))
-                  nil
-                part1-entry))
-          (if (-check-compound-split dict :compound-middle word i (1+ num-part1) allow-bad-forceucase)
-              part1-entry
-            nil))))))
+  (let* ((part1-text (substring word start-pos i))
+         (part1-entry (-check-word-in-compound dict mode part1-text)))
+    (and part1-entry
+         (not (-flags-contain (cdr part1-entry) (-dict-forbiddenword-flag dict)))
+         (not (and (-dict-compound-check-triple dict) (-three-equal-at-boundary-p word i)))
+         (not (and (-dict-compound-check-case dict) (-uppercase-at-compound-boundary-p word i)))
+         (let* ((root-flag (-dict-compound-root-flag dict))
+                (num-part1 (+ num-part (if (-flags-contain (cdr part1-entry) root-flag) 1 0)))
+                (part2-text (substring word i))
+                (part2-entry (-check-word-in-compound dict :compound-end part2-text))
+                (success2
+                 (and part2-entry
+                      (not (-flags-contain (cdr part2-entry) (-dict-forbiddenword-flag dict)))
+                      (not (and (-dict-compound-check-duplicate dict)
+                                (eq (cdr part1-entry) (cdr part2-entry))))
+                      (not (and (/= 0 (-dict-compound-force-uppercase dict))
+                                (not allow-bad-forceucase)
+                                (-flags-contain (cdr part2-entry) (-dict-compound-force-uppercase dict)))))))
+           (if success2
+               (let ((num-part2 (+ num-part1 (if (-flags-contain (cdr part2-entry) root-flag) 1 0))))
+                 (and (not (and (/= 0 (-dict-compound-max-word-count dict))
+                                (>= (1+ num-part2) (-dict-compound-max-word-count dict))))
+                      part1-entry))
+             (and (-check-compound-split dict :compound-middle word i (1+ num-part1) allow-bad-forceucase)
+                  part1-entry))))))
 
 (defun -check-compound-split (dict mode word start-pos num-part allow-bad-forceucase)
   "Try every split point of WORD[START-POS:] respecting COMPOUNDMIN."
-  (catch '-check-compound-split
-    (let* ((min-len (if (/= 0 (-dict-compound-min-length dict))
-                         (-dict-compound-min-length dict)
-                       3))
-           (len (length word)))
-      (when (< (- len start-pos) (* 2 min-len))
-        (throw '-check-compound-split nil))
-      (let ((i (+ start-pos min-len))
-            (last-i (- len min-len)))
-        (while (<= i last-i)
-          (let ((r (-check-compound-classic dict mode word start-pos i num-part
-                                             allow-bad-forceucase)))
-            (when r (throw '-check-compound-split r)))
-          (setq i (1+ i))))
-      nil)))
+  (let* ((min-len (if (/= 0 (-dict-compound-min-length dict))
+                       (-dict-compound-min-length dict)
+                     3))
+         (len (length word)))
+    (and (>= (- len start-pos) (* 2 min-len))
+         (-dolist-until (i (number-sequence (+ start-pos min-len) (- len min-len)))
+           (-check-compound-classic dict mode word start-pos i num-part
+                                     allow-bad-forceucase)))))
 
 (defun -compound-rules-has-any-flag-p (dict flags)
   (any (lambda (f) (-flags-contain flags f)) (-dict-compound-rules-all-flags dict)))
 
 (defun -find-compound-rule-word (dict word)
-  (catch '-find-compound-rule-word
-    (dolist (flags (gethash word (-dict-words dict)))
-      (unless (or (-flags-contain flags (-dict-need-affix-flag dict))
-                  (not (-compound-rules-has-any-flag-p dict flags)))
-        (throw '-find-compound-rule-word (cons word flags))))
-    nil))
+  (-dolist-until (flags (gethash word (-dict-words dict)))
+    (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
+                  (not (-compound-rules-has-any-flag-p dict flags))))
+         (cons word flags))))
 
 (defun -match-compound-rule-1 (data pattern)
   "Match flag lists DATA (one per word part) against a compound-rule PATTERN.
@@ -771,38 +743,27 @@ PATTERN is a list of (FLAG . QUANT), QUANT one of nil, ?? or ?*."
   "Try to split WORD[START-POS:] according to COMPOUNDRULE patterns.
 WORDS-DATA is the flag lists of the ancestor parts already matched,
 most recent first."
-  (catch '-check-compound-with-rules
-    (let* ((min-len (if (/= 0 (-dict-compound-min-length dict))
-                         (-dict-compound-min-length dict)
-                       3))
-           (len (length word)))
-      (when (< (- len start-pos) (* 2 min-len))
-        (throw '-check-compound-with-rules nil))
-      (let ((i (+ start-pos min-len))
-            (last-i (- len min-len)))
-        (while (<= i last-i)
-          (let* ((part1-text (substring word start-pos i))
-                 (part1-entry (-find-compound-rule-word dict part1-text)))
-            (when part1-entry
-              (let* ((words-data1 (cons (cdr part1-entry) words-data))
-                     (part2-text (substring word i))
-                     (part2-entry (-find-compound-rule-word dict part2-text)))
-                (if part2-entry
-                    (let ((words-data2 (cons (cdr part2-entry) words-data1)))
-                      (if (and (-match-compound-rules dict (reverse words-data2))
-                               (not (and (/= 0 (-dict-compound-force-uppercase dict))
-                                         (not allow-bad-forceucase)
-                                         (-flags-contain (cdr part2-entry)
-                                                          (-dict-compound-force-uppercase dict)))))
-                          (throw '-check-compound-with-rules part1-entry)
-                        (let ((rec (-check-compound-with-rules dict word words-data1 i
-                                                                allow-bad-forceucase)))
-                          (when rec (throw '-check-compound-with-rules rec)))))
-                  (let ((rec (-check-compound-with-rules dict word words-data1 i
-                                                          allow-bad-forceucase)))
-                    (when rec (throw '-check-compound-with-rules rec)))))))
-          (setq i (1+ i))))
-      nil)))
+  (let* ((min-len (if (/= 0 (-dict-compound-min-length dict))
+                       (-dict-compound-min-length dict)
+                     3))
+         (len (length word)))
+    (and (>= (- len start-pos) (* 2 min-len))
+         (-dolist-until (i (number-sequence (+ start-pos min-len) (- len min-len)))
+           (let* ((part1-text (substring word start-pos i))
+                  (part1-entry (-find-compound-rule-word dict part1-text)))
+             (and part1-entry
+                  (let* ((words-data1 (cons (cdr part1-entry) words-data))
+                         (part2-text (substring word i))
+                         (part2-entry (-find-compound-rule-word dict part2-text)))
+                    (or (and part2-entry
+                             (let ((words-data2 (cons (cdr part2-entry) words-data1)))
+                               (and (-match-compound-rules dict (reverse words-data2))
+                                    (not (and (/= 0 (-dict-compound-force-uppercase dict))
+                                              (not allow-bad-forceucase)
+                                              (-flags-contain (cdr part2-entry)
+                                                               (-dict-compound-force-uppercase dict))))
+                                    part1-entry)))
+                        (-check-compound-with-rules dict word words-data1 i allow-bad-forceucase)))))))))
 
 (defun -check-compound (dict word allow-bad-forceucase)
   (or (and (or (/= 0 (-dict-compound-flag dict))
@@ -831,131 +792,129 @@ FLAGS, as `cdr' of the result would."
 
 (defun -classify-casing (s)
   "Classify S as `small', `init-capital', `all-capital', `pascal' or `camel'."
-  (let ((upper 0) (lower 0))
-    (dotimes (i (length s))
-      (let ((ch (aref s i)))
-        (cond ((-char-upper-p ch) (incf upper))
-              ((-char-lower-p ch) (incf lower)))))
-    (cond
-     ((zerop upper) 'small)
-     ((and (-char-upper-p (aref s 0)) (= upper 1)) 'init-capital)
-     ((zerop lower) 'all-capital)
-     ((-char-upper-p (aref s 0)) 'pascal)
-     (t 'camel))))
+  (let ((case-fold-search nil)
+        (upper-rx "[[:upper:]]+")
+        (lower-rx "[[:lower:]]"))
+    (if (not (string-match upper-rx s))
+        'small
+      (let ((beg (match-beginning 0)) (end (match-end 0)))
+        (if (> beg 0)
+            ;; First character isn't upper-case, so `init-capital' and
+            ;; `pascal' (which both require that) are out; it's
+            ;; `all-capital' if there's no lower-case letter anywhere,
+            ;; `camel' otherwise.
+            (if (string-match-p lower-rx s) 'camel 'all-capital)
+          ;; First character is upper-case.  There's exactly one
+          ;; upper-case character in all of S iff this leading run is
+          ;; a single character and no further one follows it --
+          ;; checking the latter can start right after the run instead
+          ;; of rescanning it.
+          (if (and (= end 1) (not (string-match-p upper-rx s end)))
+              'init-capital
+            (if (string-match-p lower-rx s) 'pascal 'all-capital)))))))
 
 (defun -spell-casing (dict s)
-  (pcase (-classify-casing s)
-    ((or 'small 'camel 'pascal) (-check-word dict s))
-    ('all-capital (-spell-casing-upper dict s))
-    ('init-capital (-spell-casing-title dict s))))
+  "Dispatch S to the right casing-aware check for DICT.
+A leading lower-case letter already rules out `all-capital' and
+`init-capital' (both require an upper-case first character), leaving
+only `small'/`camel'/`pascal', which all go to `-check-word' anyway --
+so most words (ordinary running text) skip `-classify-casing'
+entirely."
+  (if (or (string-empty-p s) (-char-lower-p (aref s 0)))
+      (-check-word dict s)
+    (pcase (-classify-casing s)
+      ((or 'small 'camel 'pascal) (-check-word dict s))
+      ('all-capital (-spell-casing-upper dict s))
+      ('init-capital (-spell-casing-title dict s)))))
 
 (defun -spell-casing-upper (dict s)
-  (catch '-spell-casing-upper
-    (let ((res (-check-word dict s t)))
-      (when res (throw '-spell-casing-upper res)))
-    ;; Apostrophe-separated prefix, e.g. Catalan/French/Italian
-    ;; SANT'ELIA -> Sant'+Elia.
-    (let ((apos (cl-position ?' s)))
-      (when (and apos (/= apos (1- (length s))))
-        (let* ((part1 (downcase (substring s 0 (1+ apos))))
-               (part2 (-to-title (substring s (1+ apos)))))
-          (let ((res (-check-word dict (concat part1 part2) t)))
-            (when res (throw '-spell-casing-upper res)))
-          (setq part1 (-to-title part1))
-          (let ((res (-check-word dict (concat part1 part2) t)))
-            (when res (throw '-spell-casing-upper res))))))
-    ;; German sharp s.
-    (when (and (-dict-checksharps dict) (string-search "SS" s))
-      (let ((res (-spell-sharps dict (downcase s))))
-        (when res (throw '-spell-casing-upper res)))
-      (let ((res (-spell-sharps dict (-to-title s))))
-        (when res (throw '-spell-casing-upper res))))
-    (let* ((s2 (-to-title s))
-           (res (-check-word dict s2 t)))
-      (when (and res (not (-flags-contain (cdr res) (-dict-keepcase-flag dict))))
-        (throw '-spell-casing-upper res)))
-    (let* ((s2 (downcase s))
-           (res (-check-word dict s2 t)))
-      (when (and res (not (-flags-contain (cdr res) (-dict-keepcase-flag dict))))
-        (throw '-spell-casing-upper res)))
-    nil))
+  (or (-check-word dict s t)
+      ;; Apostrophe-separated prefix, e.g. Catalan/French/Italian
+      ;; SANT'ELIA -> Sant'+Elia.
+      (let ((apos (cl-position ?' s)))
+        (and apos (/= apos (1- (length s)))
+             (let* ((part1 (downcase (substring s 0 (1+ apos))))
+                    (part2 (-to-title (substring s (1+ apos)))))
+               (or (-check-word dict (concat part1 part2) t)
+                   (progn
+                     (setq part1 (-to-title part1))
+                     (-check-word dict (concat part1 part2) t))))))
+      ;; German sharp s.
+      (and (-dict-checksharps dict) (string-search "SS" s)
+           (or (-spell-sharps dict (downcase s))
+               (-spell-sharps dict (-to-title s))))
+      (let* ((s2 (-to-title s))
+             (res (-check-word dict s2 t)))
+        (and res (not (-flags-contain (cdr res) (-dict-keepcase-flag dict))) res))
+      (let* ((s2 (downcase s))
+             (res (-check-word dict s2 t)))
+        (and res (not (-flags-contain (cdr res) (-dict-keepcase-flag dict))) res))))
 
 (defun -spell-casing-title (dict s)
-  (catch '-spell-casing-title
-    (let ((res (-check-word dict s t t)))
-      (when res (throw '-spell-casing-title res)))
-    (let* ((s2 (downcase s))
-           (res (-check-word dict s2 t)))
-      (when (and res (-flags-contain (cdr res) (-dict-keepcase-flag dict))
+  (or (-check-word dict s t t)
+      (let* ((s2 (downcase s))
+             (res (-check-word dict s2 t)))
+        (if (and res (-flags-contain (cdr res) (-dict-keepcase-flag dict))
                  (not (and (-dict-checksharps dict) (string-search "ß" s2))))
-        (setq res nil))
-      res)))
+            nil
+          res))))
 
 (defun -spell-sharps (dict base &optional pos n rep)
   "Recursively try replacing \"ss\" with \"ß\" in BASE, German-style."
   (setq pos (or pos 0) n (or n 0) rep (or rep 0))
-  (catch '-spell-sharps
-    (let ((max-sharps 5)
-          (found (string-search "ss" base pos)))
-      (if (and found (< n max-sharps))
-          (progn
-            (let* ((replaced (concat (substring base 0 found) "ß"
-                                      (substring base (+ found 2))))
-                   (res (-spell-sharps dict replaced (1+ found) (1+ n) (1+ rep))))
-              (when res (throw '-spell-sharps res)))
-            (let ((res (-spell-sharps dict base (+ found 2) (1+ n) rep)))
-              (when res (throw '-spell-sharps res)))
-            nil)
-        (if (> rep 0)
-            (-check-word dict base t)
-          nil)))))
+  (let ((max-sharps 5)
+        (found (string-search "ss" base pos)))
+    (if (and found (< n max-sharps))
+        (or (let ((replaced (concat (substring base 0 found) "ß"
+                                     (substring base (+ found 2)))))
+              (-spell-sharps dict replaced (1+ found) (1+ n) (1+ rep)))
+            (-spell-sharps dict base (+ found 2) (1+ n) rep))
+      (and (> rep 0)
+           (-check-word dict base t)))))
 
 ;;;; Word breaking (BREAK) and top-level checking
 
 (defun -spell-break (dict s depth)
-  (catch '-spell-break
-    (let ((res (-spell-casing dict s)))
-      (when res
+  (let ((res (-spell-casing dict s)))
+    (if res
         (let ((flags (cdr res)))
-          (throw '-spell-break
-            (not (or (-flags-contain flags (-dict-forbiddenword-flag dict))
-                      (and (-dict-forbid-warn dict)
-                           (-flags-contain flags (-dict-warn-flag dict)))))))))
-    (when (= depth 9) (throw '-spell-break nil))
-    (dolist (pat (-dict-break-start dict))
-      (when (string-prefix-p pat s)
-        (let ((res (-spell-break dict (substring s (length pat)) (1+ depth))))
-          (when res (throw '-spell-break res)))))
-    (dolist (pat (-dict-break-end dict))
-      (when (string-suffix-p pat s)
-        (let ((res (-spell-break dict (substring s 0 (- (length s) (length pat))) (1+ depth))))
-          (when res (throw '-spell-break res)))))
-    (dolist (pat (-dict-break-middle dict))
-      (unless (string-empty-p pat)
-        (let ((i (string-search pat s)))
-          (when (and i (> i 0) (< i (- (length s) (length pat))))
-            (let ((res1 (-spell-break dict (substring s 0 i) (1+ depth))))
-              (when res1
-                (let ((res2 (-spell-break dict (substring s (+ i (length pat))) (1+ depth))))
-                  (when res2 (throw '-spell-break res2)))))))))
-    nil))
+          (not (or (-flags-contain flags (-dict-forbiddenword-flag dict))
+                    (and (-dict-forbid-warn dict)
+                         (-flags-contain flags (-dict-warn-flag dict))))))
+      (and (/= depth 9)
+           (or (-dolist-until (pat (-dict-break-start dict))
+                 (and (string-prefix-p pat s)
+                      (-spell-break dict (substring s (length pat)) (1+ depth))))
+               (-dolist-until (pat (-dict-break-end dict))
+                 (and (string-suffix-p pat s)
+                      (-spell-break dict (substring s 0 (- (length s) (length pat)))
+                                    (1+ depth))))
+               (-dolist-until (pat (-dict-break-middle dict))
+                 (and (not (string-empty-p pat))
+                      (let ((i (string-search pat s)))
+                        (and i (> i 0) (< i (- (length s) (length pat)))
+                             (-spell-break dict (substring s 0 i) (1+ depth))
+                             (-spell-break dict (substring s (+ i (length pat)))
+                                           (1+ depth)))))))))))
 
 (defun -number-p (s)
   "Return non-nil if S looks like a number (possibly with . , - separators)."
-  (catch '-number-p
-    (when (string-empty-p s) (throw '-number-p nil))
-    (let ((i 0) (n (length s)))
+  (if (string-empty-p s)
+      nil
+    (let ((i 0) (n (length s)) (done nil) (result nil))
       (when (eq (aref s 0) ?-) (setq i 1))
-      (while (< i n)
+      (while (and (< i n) (not done))
         (let ((start i))
           (while (and (< i n) (<= ?0 (aref s i) ?9)) (setq i (1+ i)))
-          (when (= i start) (throw '-number-p nil))
-          (when (= i n) (throw '-number-p t))
-          (let ((c (aref s i)))
-            (if (memq c '(?. ?, ?-))
-                (setq i (1+ i))
-              (throw '-number-p nil)))))
-      nil)))
+          (cond
+           ((= i start) (setq done t result nil))
+           ((= i n) (setq done t result t))
+           (t
+            (let ((c (aref s i)))
+              (if (memq c '(?. ?, ?-))
+                  (setq i (1+ i))
+                (setq done t result nil)))))))
+      result)))
 
 (defun -erase-chars (s chars)
   (if (string-empty-p chars)
@@ -998,32 +957,31 @@ Morphological fields, if any, are discarded.  A backslash-escaped
 slash within the word is unescaped and kept as a literal character."
   (when (and (> (length line) 0) (eq (aref line (1- (length line))) ?\r))
     (setq line (substring line 0 -1)))
-  (let ((i 0) (n (length line)) (word-chars nil) flags-str)
-    (catch '-parse-dic-line
-      (while (< i n)
-        (let ((c (aref line i)))
-          (cond
-           ((and (eq c ?\\) (< (1+ i) n) (eq (aref line (1+ i)) ?/))
-            (push ?/ word-chars)
-            (setq i (+ i 2)))
-           ;; A "/" at the very start of the line is a literal
-           ;; character, not a flags separator -- this is what lets a
-           ;; word like "/usr/share/myspell/" start with "/" without
-           ;; escaping it, and is how a bare "/" is written as a word.
-           ((and (eq c ?/) (= i 0))
-            (push c word-chars)
-            (setq i (1+ i)))
-           ((eq c ?/)
-            (let ((j (1+ i)))
-              (while (and (< j n) (not (memq (aref line j) '(?\s ?\t))))
-                (setq j (1+ j)))
-              (setq flags-str (substring line (1+ i) j)))
-            (throw '-parse-dic-line nil))
-           ((memq c '(?\s ?\t))
-            (throw '-parse-dic-line nil))
-           (t
-            (push c word-chars)
-            (setq i (1+ i)))))))
+  (let ((i 0) (n (length line)) (word-chars nil) flags-str (done nil))
+    (while (and (< i n) (not done))
+      (let ((c (aref line i)))
+        (cond
+         ((and (eq c ?\\) (< (1+ i) n) (eq (aref line (1+ i)) ?/))
+          (push ?/ word-chars)
+          (setq i (+ i 2)))
+         ;; A "/" at the very start of the line is a literal
+         ;; character, not a flags separator -- this is what lets a
+         ;; word like "/usr/share/myspell/" start with "/" without
+         ;; escaping it, and is how a bare "/" is written as a word.
+         ((and (eq c ?/) (= i 0))
+          (push c word-chars)
+          (setq i (1+ i)))
+         ((eq c ?/)
+          (let ((j (1+ i)))
+            (while (and (< j n) (not (memq (aref line j) '(?\s ?\t))))
+              (setq j (1+ j)))
+            (setq flags-str (substring line (1+ i) j)))
+          (setq done t))
+         ((memq c '(?\s ?\t))
+          (setq done t))
+         (t
+          (push c word-chars)
+          (setq i (1+ i))))))
     (if word-chars
         (cons (concat (nreverse word-chars)) flags-str)
       nil)))
@@ -1050,7 +1008,13 @@ rather than accepting it outright; see `-hidden-homonym-flag'."
   (with-temp-buffer
     (insert-file-contents file)
     (goto-char (point-min))
-    (forward-line 1)                   ; first line is an approximate word count
+    ;; The first line is an approximate word count; use it to presize the
+    ;; words table so it isn't repeatedly grown and rehashed as entries
+    ;; are added below.
+    (let ((count (string-to-number (buffer-substring-no-properties
+                                    (pos-bol) (pos-eol)))))
+      (setf (-dict-words dict) (make-hash-table :test 'equal :size (max count 65))))
+    (forward-line 1)
     (while (not (eobp))
       (let* ((line (buffer-substring-no-properties (pos-bol) (pos-eol)))
              (parsed (-parse-dic-line line)))
@@ -1314,7 +1278,10 @@ the top of this file for the limitations of this port."
       (error "vibe-spell: cannot read %s" aff-file))
     (unless (file-readable-p dic-file)
       (error "vibe-spell: cannot read %s" dic-file))
-    (let ((d (-dict-create :words (make-hash-table :test 'equal))))
+    (let ((d (-dict-create))
+          ;; Loading briefly allocates a lot (the words table, flag
+          ;; lists, ...); let it run without GC interrupting partway.
+          (gc-cons-threshold most-positive-fixnum))
       (-parse-aff d aff-file)
       (when (-dict-complex-prefixes d)
         (error "vibe-spell: %s uses COMPLEXPREFIXES, which is not supported" dict))
