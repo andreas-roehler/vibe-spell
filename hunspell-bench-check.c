@@ -20,8 +20,8 @@
  * DICT-NAME is looked up as /usr/share/hunspell/DICT-NAME.{aff,dic},
  * matching `vibe-spell-dictionary-path''s default.
  *
- * Build: cc -O2 -o hunspell-bench-check hunspell-bench-check.c \
- *            $(pkg-config --cflags --libs hunspell)
+ * Build: make .tmp/hunspell-bench-check, which links against a static Hunspell built
+ * from the hunspell/ source checkout.
  */
 
 #include <errno.h>

@@ -158,7 +158,8 @@ nil, without error, if WORD is too long for suggestions to be
 attempted; see the 360-character limit note in the Commentary at the
 top of this file."
   (unless (length> word -max-word-length)
-    (-suggest-priv dict word)))
+    (let ((gc-cons-percentage (max gc-cons-percentage 1.0)))
+      (-suggest-priv dict word))))
 
 (defun vibe-spell-add-word (dict word &optional save)
   "Add WORD to DICT, and optionally SAVE to personal dictionary file.
@@ -244,7 +245,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
   (chars "") (strings nil))
 
 (cl-defstruct (-dict (:constructor -dict-create))
-  (words nil)                          ; hash-table: word -> list of flag lists
+  (words nil)                          ; hash-table: word -> (LOWERCASED . list of flag lists)
   (pdict nil)                          ; personal dictionary file name
   (prefix-table nil)                   ; sorted vector of (KEY . `-prefix'), KEY = appending
   (suffix-table nil)                   ; sorted vector of (KEY . `-suffix'), KEY = (reverse appending)
@@ -287,7 +288,12 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
   (nosuggest-flag 0)
   (max-ngram-suggestions 4)
   (max-diff-factor 5)
-  (only-max-diff nil))
+  (only-max-diff nil)
+  (ngram-candidates nil))              ; cache, see `-ngram-candidates'
+
+(defsubst -homonyms (dict word)
+  "Return the list of flag lists of WORD's homonym entries in DICT."
+  (cdr (gethash word (-dict-words dict))))
 
 ;;;; Flags and flag sets
 
@@ -606,7 +612,7 @@ without ever building that root string; see
 ;; Each of these functions returns (ROOT-WORD . FLAGS), where
 ;; ROOT-WORD is the dictionary key that was found and FLAGS is the
 ;; specific flag list of that homonym entry (`eq'-comparable to
-;; whatever is stored in the `-dict-words' hash table), or nil if no
+;; whatever `-homonyms' returns for it), or nil if no
 ;; match was found.  This is a simplified version of Nuspell's
 ;; `Affixing_Result', which also carries the affix objects used; this
 ;; port has no use for that, since it does not implement Nuspell's
@@ -623,7 +629,7 @@ without ever building that root string; see
                   (-circumfix-flags-p dict (-suffix-cont-flags se))))
          (-suffix-condition-matches-p se word)
          (let ((root (-suffix-to-root se word)))
-           (-dolist-until (flags (gethash root (-dict-words dict)))
+           (-dolist-until (flags (-homonyms dict root))
              (and (-cross-valid-p flags (-suffix-flag se))
                   (not (and (eq mode :full-word)
                             (-flags-contain flags (-dict-compound-onlyin-flag dict))))
@@ -638,7 +644,7 @@ without ever building that root string; see
                   (-circumfix-flags-p dict (-prefix-cont-flags pe))))
          (-prefix-condition-matches-p pe word)
          (let ((root (-prefix-to-root pe word)))
-           (-dolist-until (flags (gethash root (-dict-words dict)))
+           (-dolist-until (flags (-homonyms dict root))
              (and (-cross-valid-p flags (-prefix-flag pe))
                   (not (and (eq mode :full-word)
                             (-flags-contain flags (-dict-compound-onlyin-flag dict))))
@@ -673,7 +679,7 @@ Nuspell's \"commutative\" variant does."
                   (eq circumfix-pe (-circumfix-flags-p dict se-cont))
                   (-suffix-condition-matches-p se word)
                   (let ((root (-suffix-to-root se word)))
-                    (-dolist-until (flags (gethash root (-dict-words dict)))
+                    (-dolist-until (flags (-homonyms dict root))
                       (let* ((valid-pe-outer
                               (and (not has-needaffix-pe)
                                    (-cross-valid-p flags (-suffix-flag se))
@@ -708,7 +714,7 @@ Nuspell's \"commutative\" variant does."
                   (-circumfix-flags-p dict (-suffix-cont-flags se2))))
          (-suffix-condition-matches-p se2 word)
          (let ((root (-suffix-to-root se2 word)))
-           (-dolist-until (flags (gethash root (-dict-words dict)))
+           (-dolist-until (flags (-homonyms dict root))
              (and (-cross-valid-p flags (-suffix-flag se2))
                   (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
                   (not (and skip-hidden (-hidden-homonym-p flags)))
@@ -736,7 +742,7 @@ Nuspell's \"commutative\" variant does."
                   (-circumfix-flags-p dict (-suffix-cont-flags se2))))
          (-suffix-condition-matches-p se2 word)
          (let ((root (-suffix-to-root se2 word)))
-           (-dolist-until (flags (gethash root (-dict-words dict)))
+           (-dolist-until (flags (-homonyms dict root))
              (and (or (-cross-valid-p (-suffix-cont-flags se1) (-prefix-flag pe1))
                       (-cross-valid-p flags (-prefix-flag pe1)))
                   (-cross-valid-p flags (-suffix-flag se2))
@@ -771,7 +777,7 @@ Nuspell's \"commutative\" variant does."
            (and (or ok1 ok2)
                 (-suffix-condition-matches-p se2 word)
                 (let ((root (-suffix-to-root se2 word)))
-                  (-dolist-until (flags (gethash root (-dict-words dict)))
+                  (-dolist-until (flags (-homonyms dict root))
                     (and (or (-cross-valid-p (-suffix-cont-flags se2) (-prefix-flag pe1))
                              (-cross-valid-p flags (-prefix-flag pe1)))
                          (-cross-valid-p flags (-suffix-flag se2))
@@ -785,7 +791,7 @@ Nuspell's \"commutative\" variant does."
   "Check WORD as a single (possibly affixed) dictionary entry.
 Return (ROOT-WORD . FLAGS) or nil; see the affix-stripping functions
 above for the shape of the result."
-  (or (-dolist-until (flags (gethash word (-dict-words dict)))
+  (or (-dolist-until (flags (-homonyms dict word))
         (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
                       (-flags-contain flags (-dict-compound-onlyin-flag dict))
                       (and skip-hidden (-hidden-homonym-p flags))))
@@ -806,7 +812,7 @@ MODE is :compound-begin, :compound-middle or :compound-end."
                         ((eq mode :compound-middle) (-dict-compound-middle-flag dict))
                         ((eq mode :compound-end) (-dict-compound-last-flag dict))
                         (t 0))))
-    (or (-dolist-until (flags (gethash word (-dict-words dict)))
+    (or (-dolist-until (flags (-homonyms dict word))
           (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
                         (not (or (-flags-contain flags (-dict-compound-flag dict))
                                  (-flags-contain flags cpd-flag)))
@@ -882,7 +888,7 @@ matching the position of the first part."
   (any (lambda (f) (-flags-contain flags f)) (-dict-compound-rules-all-flags dict)))
 
 (defun -find-compound-rule-word (dict word)
-  (-dolist-until (flags (gethash word (-dict-words dict)))
+  (-dolist-until (flags (-homonyms dict word))
     (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
                   (not (-compound-rules-has-any-flag-p dict flags))))
          (cons word flags))))
@@ -1510,58 +1516,82 @@ which case the caller may skip the much more expensive
   "Hard cap on the number of suggestions `-ngram-suggest' may add.
 Mirrors Nuspell's `Aff_Data::MAX_SUGGESTIONS'.")
 
-(defun -ngram-similarity-low-level (n a b)
+(defun -kgrams (n a)
+  "Return the k-grams of A, for k=1..N, as a vector of vectors.
+Element K-1 is the vector of A's K-grams, in order.  The n-gram
+similarity functions below accept this as an optional precomputed
+A-GRAMS argument: `-ngram-suggest' compares the same misspelled word
+against every dictionary word, so extracting its k-grams once per
+call, rather than once per comparison, avoids redoing that work (and
+its allocations) tens of thousands of times."
+  (let* ((len (length a))
+         (n (min n len))
+         (result (make-vector n nil)))
+    (dotimes (k0 n)
+      (let ((grams (make-vector (- len k0) nil)))
+        (dotimes (i (length grams))
+          (aset grams i (substring a i (+ i k0 1))))
+        (aset result k0 grams)))
+    result))
+
+(defun -ngram-similarity-low-level (n a b &optional a-grams)
   "Return a raw k-gram-overlap similarity score of A against B, k=1..N.
+A-GRAMS, if non-nil, is `-kgrams' of A for some N' >= N.
 Mirrors Nuspell's `ngram_similarity_low_level'."
-  (let ((n (min n (length a))) (score 0))
-    (-dolist-until (k (number-sequence 1 n))
-      (let ((k-score 0))
-        (dotimes (i (1+ (- (length a) k)))
-          (when (string-search (substring a i (+ i k)) b)
+  (let ((grams (or a-grams (-kgrams n a)))
+        (n (min n (length a)))
+        (score 0)
+        (k0 0))
+    (while (< k0 n)
+      (let ((v (aref grams k0)) (k-score 0))
+        (dotimes (i (length v))
+          (when (string-search (aref v i) b)
             (setq k-score (1+ k-score))))
         (setq score (+ score k-score))
-        (< k-score 2)))
+        (setq k0 (if (< k-score 2) n (1+ k0)))))
     score))
 
-(defun -ngram-similarity-weighted-low-level (n a b)
+(defun -ngram-similarity-weighted-low-level (n a b &optional a-grams)
   "Like `-ngram-similarity-low-level', but penalizing non-matching k-grams.
+A-GRAMS is as in `-ngram-similarity-low-level'.
 Mirrors Nuspell's `ngram_similarity_weighted_low_level'."
-  (let ((n (min n (length a))) (score 0))
-    (dolist (k (number-sequence 1 n))
-      (let ((k-score 0))
-        (dotimes (i (1+ (- (length a) k)))
-          (if (string-search (substring a i (+ i k)) b)
+  (let ((grams (or a-grams (-kgrams n a)))
+        (score 0))
+    (dotimes (k0 (min n (length a)))
+      (let* ((v (aref grams k0)) (last (1- (length v))) (k-score 0))
+        (dotimes (i (length v))
+          (if (string-search (aref v i) b)
               (setq k-score (1+ k-score))
             (setq k-score (1- k-score))
-            (when (or (= i 0) (= i (- (length a) k)))
+            (when (or (= i 0) (= i last))
               (setq k-score (1- k-score)))))
         (setq score (+ score k-score))))
     score))
 
-(defun -ngram-similarity-longer-worse (n a b)
+(defun -ngram-similarity-longer-worse (n a b &optional a-grams)
   "`-ngram-similarity-low-level', penalized when B is much longer than A.
 Mirrors Nuspell's `ngram_similarity_longer_worse'."
   (if (string-empty-p b)
       0
-    (let ((score (-ngram-similarity-low-level n a b))
+    (let ((score (-ngram-similarity-low-level n a b a-grams))
           (d (- (- (length b) (length a)) 2)))
       (if (> d 0) (- score d) score))))
 
-(defun -ngram-similarity-any-mismatch (n a b)
+(defun -ngram-similarity-any-mismatch (n a b &optional a-grams)
   "`-ngram-similarity-low-level', penalized when A and B differ much in length.
 Mirrors Nuspell's `ngram_similarity_any_mismatch'."
   (if (string-empty-p b)
       0
-    (let ((score (-ngram-similarity-low-level n a b))
+    (let ((score (-ngram-similarity-low-level n a b a-grams))
           (d (- (abs (- (length b) (length a))) 2)))
       (if (> d 0) (- score d) score))))
 
-(defun -ngram-similarity-any-mismatch-weighted (n a b)
+(defun -ngram-similarity-any-mismatch-weighted (n a b &optional a-grams)
   "Weighted version of `-ngram-similarity-any-mismatch'.
 Mirrors Nuspell's `ngram_similarity_any_mismatch_weighted'."
   (if (string-empty-p b)
       0
-    (let ((score (-ngram-similarity-weighted-low-level n a b))
+    (let ((score (-ngram-similarity-weighted-low-level n a b a-grams))
           (d (- (abs (- (length b) (length a))) 2)))
       (if (> d 0) (- score d) score))))
 
@@ -1654,28 +1684,66 @@ optimization only.  Mirrors Nuspell's
           (push (-prefix-from-root pfx root) prefixed))))
     (append base suffixed combo prefixed)))
 
-(defun -ngram-select-top (candidates limit)
-  "Return the LIMIT highest-scoring entries of CANDIDATES, a list of
-\(SCORE . VALUE), sorted by descending score."
-  (take limit (sort candidates (lambda (a b) (> (car a) (car b))))))
+(defun -heap-replace (heap entry)
+  "Replace the root of HEAP, a `value<'-ordered min-heap vector, with ENTRY.
+The root, HEAP's worst entry, is discarded and ENTRY sifted down to its
+place.  Like Python's `heapq.heapreplace'."
+  (let ((n (length heap)) (i 0) (done nil))
+    (while (not done)
+      (let ((child (1+ (* 2 i))))
+        (when (and (< (1+ child) n)
+                   (value< (aref heap (1+ child)) (aref heap child)))
+          (setq child (1+ child)))
+        (if (and (< child n) (value< (aref heap child) entry))
+            (progn (aset heap i (aref heap child))
+                   (setq i child))
+          (setq done t))))
+    (aset heap i entry)))
+
+(defun -ngram-candidates (dict)
+  "Return the dictionary entries `-ngram-suggest' may suggest from.
+This is a vector of (WORD LOWER FLAGS), one per homonym entry of DICT's
+words table that is not forbidden, hidden, NOSUGGEST or ONLYINCOMPOUND,
+in the table's order; LOWER is WORD's lowercased form.  Which entries
+qualify depends only on DICT, so this is computed on first use and
+cached, rather than re-filtered on every suggestion; `-dict-add-word'
+and `-dict-remove-word' clear the cache."
+  (or (-dict-ngram-candidates dict)
+      (let (acc)
+        (maphash
+         (lambda (word entry)
+           (dolist (flags (cdr entry))
+             (unless (or (-flags-contain flags (-dict-forbiddenword-flag dict))
+                         (-hidden-homonym-p flags)
+                         (-flags-contain flags (-dict-nosuggest-flag dict))
+                         (-flags-contain flags (-dict-compound-onlyin-flag dict)))
+               (push (list word (car entry) flags) acc))))
+         (-dict-words dict))
+        (setf (-dict-ngram-candidates dict) (vconcat (nreverse acc))))))
 
 (defun -ngram-suggest (dict wrong-word box)
   "Add n-gram-similarity-based suggestions for WRONG-WORD to BOX.
 WRONG-WORD is assumed already lower-cased.  Mirrors Nuspell's
 `Suggester::ngram_suggest'."
-  (let (roots)
-    (maphash
-     (lambda (word flags-list)
-       (dolist (flags flags-list)
-         (unless (or (-flags-contain flags (-dict-forbiddenword-flag dict))
-                     (-hidden-homonym-p flags)
-                     (-flags-contain flags (-dict-nosuggest-flag dict))
-                     (-flags-contain flags (-dict-compound-onlyin-flag dict)))
-           (let ((score (+ (-left-common-substring-length wrong-word word)
-                           (-ngram-similarity-longer-worse 3 wrong-word (downcase word)))))
-             (push (list score word flags) roots)))))
-     (-dict-words dict))
-    (setq roots (-ngram-select-top roots 100))
+  (let ((wrong-grams (-kgrams (length wrong-word) wrong-word))
+        (candidates (-ngram-candidates dict))
+        ;; Keep the best 100 roots in a `-heap-replace' heap of (SCORE
+        ;; IDX . VALUE).  IDX increases, so it breaks ties on SCORE in
+        ;; favor of the later offer, as a stable sort of a `push'ed list
+        ;; would, and a newcomer beats the root iff its SCORE is at least
+        ;; as high.  The filler entries have a nil VALUE.
+        (top-roots (make-vector 100 (list most-negative-fixnum 0)))
+        roots)
+    (dotimes (i (length candidates))
+      (let* ((c (aref candidates i))
+             (score (+ (-left-common-substring-length wrong-word (car c))
+                       (-ngram-similarity-longer-worse 3 wrong-word (cadr c) wrong-grams))))
+        (when (>= score (car (aref top-roots 0)))
+          (-heap-replace top-roots (cons score (cons i c))))))
+    ;; Each root is (SCORE WORD LOWER FLAGS), sharing its tail with the
+    ;; `-ngram-candidates' entry.
+    (setq roots (mapcan (lambda (e) (and (cddr e) (list (cons (car e) (cddr e)))))
+                        (sort top-roots :reverse t :in-place t)))
 
     (let ((threshold 0))
       (dolist (k '(1 2 3))
@@ -1689,20 +1757,24 @@ WRONG-WORD is assumed already lower-cased.  Mirrors Nuspell's
             (setq i (+ i 4)))
           (setq threshold (+ threshold
                              (-ngram-similarity-any-mismatch
-                              (length wrong-word) wrong-word mangled)))))
+                              (length wrong-word) wrong-word mangled wrong-grams)))))
       (setq threshold (/ threshold 3))
 
-      (let (guesses)
+      (let ((top-guesses (make-vector 200 (list most-negative-fixnum 0)))
+            (guess-idx 0)
+            guesses)
         (dolist (r roots)
-          (pcase-let ((`(,_ ,word ,flags) r))
+          (pcase-let ((`(,_ ,word ,word-lower ,flags) r))
             (dolist (expanded (-expand-root-word-for-ngram dict word flags wrong-word))
-              (let* ((lower (downcase expanded))
+              (let* ((lower (if (eq expanded word) word-lower (downcase expanded)))
                      (score (+ (-left-common-substring-length wrong-word expanded)
                                (-ngram-similarity-any-mismatch
-                                (length wrong-word) wrong-word lower))))
-                (when (>= score threshold)
-                  (push (cons score expanded) guesses))))))
-        (setq guesses (-ngram-select-top guesses 200))
+                                (length wrong-word) wrong-word lower wrong-grams))))
+                (when (and (>= score threshold)
+                           (>= score (car (aref top-guesses 0))))
+                  (-heap-replace top-guesses (cons score (cons (incf guess-idx) expanded))))))))
+        (setq guesses (mapcan (lambda (e) (and (cddr e) (list (cons (car e) (cddr e)))))
+                              (sort top-guesses :reverse t :in-place t)))
 
         (-dolist-until (g guesses)
           (pcase-let ((`(,score . ,word) g))
@@ -1711,9 +1783,9 @@ WRONG-WORD is assumed already lower-cased.  Mirrors Nuspell's
               (if (and (= (length wrong-word) (length lower))
                        (= (length wrong-word) lcs))
                   (progn (setcar g (+ score 2000)) t)
-                (let* ((ngram2 (+ (-ngram-similarity-any-mismatch-weighted 2 wrong-word lower)
+                (let* ((ngram2 (+ (-ngram-similarity-any-mismatch-weighted 2 wrong-word lower wrong-grams)
                                   (-ngram-similarity-any-mismatch-weighted 2 lower wrong-word)))
-                       (ngram4 (-ngram-similarity-any-mismatch 4 wrong-word lower))
+                       (ngram4 (-ngram-similarity-any-mismatch 4 wrong-word lower wrong-grams))
                        (left-common (-left-common-substring-length wrong-word lower))
                        (eq-info (-count-eq-chars-at-same-pos wrong-word lower))
                        (new-score (- (* 2 lcs) (abs (- (length wrong-word) (length lower))))))
@@ -1927,6 +1999,26 @@ slash within the word is unescaped and kept as a literal character."
         (cons (concat (nreverse word-chars)) flags-str)
       nil)))
 
+(defun -add-homonym (table word flags)
+  "Append a homonym entry with FLAGS to WORD's entry in words TABLE.
+A new entry also records WORD's lowercased form, computed once here
+rather than on every `-ngram-suggest' call, which needs it for every
+dictionary word; it is WORD itself, with no allocation, when WORD is
+already all lowercase."
+  (let ((entry (gethash word table)))
+    ;; Appended, not pushed: homonyms must stay in insertion order, since
+    ;; a later one can mask an earlier one for a flag (e.g. FORBIDDENWORD)
+    ;; that only some of them carry -- see `-check-simple-word'.
+    (if entry
+        (setcdr entry (append (cdr entry) (list flags)))
+      (puthash word
+               (list (if (let ((case-fold-search nil))
+                           (string-match-p "[[:upper:]]" word))
+                         (downcase word)
+                       word)
+                     flags)
+               table))))
+
 (defun -dict-add-word (dict word flags)
   "Add dictionary entry WORD/FLAGS to DICT.
 If WORD is ALL-CAPITAL (with non-empty FLAGS), PASCAL or CAMEL cased,
@@ -1936,17 +2028,14 @@ different casing (e.g. an acronym) falls through to other checks
 rather than accepting it outright; see `-hidden-homonym-p'."
   (let* ((table (-dict-words dict))
          (casing (-classify-casing word)))
-    ;; Appended, not pushed: homonyms must stay in insertion order, since
-    ;; a later one can mask an earlier one for a flag (e.g. FORBIDDENWORD)
-    ;; that only some of them carry -- see `-check-simple-word'.
-    (puthash word (append (gethash word table) (list flags)) table)
+    (setf (-dict-ngram-candidates dict) nil)
+    (-add-homonym table word flags)
     (when (or (and (eq casing 'all-capital) flags)
               (memq casing '(pascal camel)))
       (unless (-flags-contain flags (-dict-forbiddenword-flag dict))
         (let ((title (-to-title word)))
           ;; -1 marks this entry as a hidden homonym; see `-hidden-homonym-p'.
-          (puthash title (append (gethash title table) (list (cons -1 flags)))
-                   table))))))
+          (-add-homonym table title (cons -1 flags)))))))
 
 (defun -dict-remove-word (dict word)
   "Remove one nil-flags entry of WORD from DICT's words table.
@@ -1961,11 +2050,12 @@ whether that title-cased spelling is skipped when found directly (see
 
 Return non-nil if such an entry was found and removed."
   (let* ((table (-dict-words dict))
-         (old-list (gethash word table)))
-    (when (memq nil old-list)
-      (let ((new-list (cl-remove nil old-list :count 1)))
+         (entry (gethash word table)))
+    (when (memq nil (cdr entry))
+      (setf (-dict-ngram-candidates dict) nil)
+      (let ((new-list (cl-remove nil (cdr entry) :count 1)))
         (if new-list
-            (puthash word new-list table)
+            (setcdr entry new-list)
           (remhash word table)))
       t)))
 

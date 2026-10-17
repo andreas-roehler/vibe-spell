@@ -11,16 +11,28 @@ all: $(ELC)
 	$(BATCH) -f batch-byte-compile $<
 
 clean:
-	rm -rf $(ELC) bin
+	rm -rf $(ELC) .tmp
 
+# Hunspell is built from the hunspell/ checkout as a static library,
+# compiling its sources directly; this needs no autotools run, since
+# the only generated headers (hunvisapi.h, hunversion.h) are checked in.
 CC ?= cc
-bin/hunspell-bench-check: hunspell-bench-check.c
-	mkdir -p bin
-	$(CC) -O2 -o $@ $< $$(pkg-config --cflags --libs hunspell)
+CXX ?= c++
+HUNSPELL_BUILD = .tmp/hunspell-build
+HUNSPELL_LIB = $(HUNSPELL_BUILD)/libhunspell.a
+HUNSPELL_MODULES = affentry affixmgr csutil filemgr hashmgr hunspell \
+	hunspelltrace hunzip phonet replist suggestmgr
+HUNSPELL_OBJS = $(HUNSPELL_MODULES:%=$(HUNSPELL_BUILD)/%.o)
 
-bin/hunspell-bench-suggest: hunspell-bench-suggest.c
-	mkdir -p bin
-	$(CC) -O2 -o $@ $< $$(pkg-config --cflags --libs hunspell)
+$(HUNSPELL_BUILD)/%.o: hunspell/src/hunspell/%.cxx
+	mkdir -p $(@D)
+	$(CXX) -O2 -DHUNSPELL_STATIC -c -o $@ $<
+
+$(HUNSPELL_LIB): $(HUNSPELL_OBJS)
+	$(AR) rcs $@ $^
+
+.tmp/hunspell-bench-%: hunspell-bench-%.c $(HUNSPELL_LIB)
+	$(CC) -O2 -DHUNSPELL_STATIC -Ihunspell/src -o $@ $< $(HUNSPELL_LIB) -lstdc++
 
 hunspell:
 	git clone https://github.com/hunspell/hunspell.git $@
@@ -40,34 +52,35 @@ tests: hunspell nuspell
 BENCH_LINES ?= 1000
 
 .PHONY: bench-check
-bench-check: gutenberg all bin/hunspell-bench-check
-	head -n $(BENCH_LINES) gutenberg/alice.txt > gutenberg/alice-sample.txt
-	head -n $(BENCH_LINES) gutenberg/lusiadas.txt > gutenberg/lusiadas-sample.txt
+bench-check: gutenberg all .tmp/hunspell-bench-check
+	mkdir -p .tmp
+	head -n $(BENCH_LINES) gutenberg/alice.txt > .tmp/alice-sample.txt
+	head -n $(BENCH_LINES) gutenberg/lusiadas.txt > .tmp/lusiadas-sample.txt
 	@echo ================================================================================
-	@./bin/hunspell-bench-check en_US gutenberg/alice-sample.txt
+	@.tmp/hunspell-bench-check en_US .tmp/alice-sample.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-check en_US gutenberg/alice-sample.txt
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-check en_US .tmp/alice-sample.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-check en_US gutenberg/alice-sample.txt
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-check en_US .tmp/alice-sample.txt
 	@echo ================================================================================
-	@./bin/hunspell-bench-check pt_BR gutenberg/lusiadas-sample.txt
+	@.tmp/hunspell-bench-check pt_BR .tmp/lusiadas-sample.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-check pt_BR gutenberg/lusiadas-sample.txt
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-check pt_BR .tmp/lusiadas-sample.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-check pt_BR gutenberg/lusiadas-sample.txt
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-check pt_BR .tmp/lusiadas-sample.txt
 
 MISSPELLINGS = hunspell/tests/suggestiontest/List_of_common_misspellings.txt
-BENCH_SUGGEST_LINES ?= 200
+BENCH_SUGGEST_LINES ?= 100
 
 .PHONY: bench-suggest
-bench-suggest: all bin/hunspell-bench-suggest
-	mkdir -p gutenberg
-	head -n $(BENCH_SUGGEST_LINES) $(MISSPELLINGS) > gutenberg/misspellings-sample.txt
+bench-suggest: all .tmp/hunspell-bench-suggest
+	mkdir -p .tmp
+	head -n $(BENCH_SUGGEST_LINES) $(MISSPELLINGS) > .tmp/misspellings-sample.txt
 	@echo ================================================================================
-	@./bin/hunspell-bench-suggest en_US gutenberg/misspellings-sample.txt
+	@.tmp/hunspell-bench-suggest en_US .tmp/misspellings-sample.txt
 	@echo --------------------------------------------------------------------------------
 	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-suggest \
-		en_US gutenberg/misspellings-sample.txt
+		en_US .tmp/misspellings-sample.txt
 	@echo --------------------------------------------------------------------------------
 	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-suggest \
-		en_US gutenberg/misspellings-sample.txt
+		en_US .tmp/misspellings-sample.txt
