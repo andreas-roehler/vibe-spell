@@ -7,6 +7,7 @@
 - Prefer `pcase` over `cl-case`, `dolist` and variations over simple `cl-loop`.
 - Make sure to byte-compile code being benchmarked.
 - nuspell and hunspell sources are available in this directory for your reference.
+- Don't edit the Commentary section, use ""LLM notes to self" section.
 
 ## Target Emacs 31: prefer core functions over cl-lib habits
 

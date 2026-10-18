@@ -111,36 +111,36 @@ See the Commentary at the top of this file for why.  Every other
 dictionary's test runs directly in the ERT runner's own process.")
 
 (defconst vibe-spell-tests-known-failures
-  '(("vibe-spell-test-hunspell-2970240" .
+  '((vibe-spell-test-hunspell-2970240 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-2970242" .
+    (vibe-spell-test-hunspell-2970242 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-base_utf" .
+    (vibe-spell-test-hunspell-base_utf .
      "Turkish dotless i (İ/ı) casing; casing uses Emacs's own locale-unaware
 upcase/downcase, per the Commentary in vibe-spell.el.")
-    ("vibe-spell-test-hunspell-break" .
+    (vibe-spell-test-hunspell-break .
      "Tests recursive multi-dash BREAK splitting (\"e-mail-foo\"); Nuspell's
 BREAK handling, which this ports, only retries the first occurrence of
 each pattern per split attempt, so a word with more than one break
 point fails here too.")
-    ("vibe-spell-test-hunspell-checkcompoundpattern" .
+    (vibe-spell-test-hunspell-checkcompoundpattern .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-checkcompoundpattern2" .
+    (vibe-spell-test-hunspell-checkcompoundpattern2 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-checkcompoundpattern3" .
+    (vibe-spell-test-hunspell-checkcompoundpattern3 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-checkcompoundpattern4" .
+    (vibe-spell-test-hunspell-checkcompoundpattern4 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-checkcompoundpattern5" .
+    (vibe-spell-test-hunspell-checkcompoundpattern5 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-checkcompoundpattern6" .
+    (vibe-spell-test-hunspell-checkcompoundpattern6 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-checkcompoundpattern7" .
+    (vibe-spell-test-hunspell-checkcompoundpattern7 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-checkcompoundrep" .
-     "CHECKCOMPOUNDREP is accepted but has no effect, per the Commentary in
-vibe-spell.el.")
-    ("vibe-spell-test-hunspell-compoundforbid" .
+    (vibe-spell-test-hunspell-checkcompoundrep .
+     "CHECKCOMPOUNDREP is accepted but has no effect, per the LLM notes to
+self in vibe-spell.el.")
+    (vibe-spell-test-hunspell-compoundforbid .
      "COMPOUNDFORBIDFLAG on a direct .dic entry (\"foobaz/Z\") has no effect
 on an unrelated derivation of the same string from a different root
 + suffix (\"foo\"+\"baz\"), since that derivation never looks at the
@@ -148,76 +148,76 @@ other entry's flags at all; `-check-word-in-compound' mirrors
 Nuspell's own `check_word_in_compound' exactly here, so this appears
 to be a genuine gap in Nuspell/Hunspell's COMPOUNDFORBIDFLAG
 semantics, not something specific to this port.")
-    ("vibe-spell-test-hunspell-dotless_i" .
+    (vibe-spell-test-hunspell-dotless_i .
      "Turkish dotless i (İ/ı) casing (LANG tr); casing uses Emacs's own
 locale-unaware upcase/downcase, per the Commentary in vibe-spell.el.")
-    ("vibe-spell-test-hunspell-encoding" .
+    (vibe-spell-test-hunspell-encoding .
      "Dictionary declares a non-UTF-8 SET encoding (ISO-8859-15); that
 declared encoding is not separately consulted, per the Commentary in
 vibe-spell.el.")
-    ("vibe-spell-test-hunspell-gh106" .
+    (vibe-spell-test-hunspell-gh106 .
      "Tests a Hunspell-specific fix for case-insensitive affix conditions on
 PASCAL-cased words; Nuspell's checker, which this ports, never retries
 case variants for CAMEL/PASCAL words, so this diverges from Hunspell
 upstream too.")
-    ("vibe-spell-test-hunspell-gh151" .
+    (vibe-spell-test-hunspell-gh151 .
      "SIMPLIFIEDTRIPLE's extra \"insert the elided letter back and retry\"
-fallback is not implemented, per the Commentary in vibe-spell.el.")
-    ("vibe-spell-test-hunspell-gh353" .
+fallback is not implemented, per the LLM notes to self in vibe-spell.el.")
+    (vibe-spell-test-hunspell-gh353 .
      "Hunspell treats a word made only of WORDCHARS-listed non-ASCII digits
 as a number; Nuspell's own `is_number' (which `vibe-spell-check'
 mirrors) only recognizes ASCII digits, so this diverges from Hunspell
 upstream too.")
-    ("vibe-spell-test-hunspell-hu" .
+    (vibe-spell-test-hunspell-hu .
      "Hungarian COMPOUNDSYLLABLE/SYLLABLENUM (the exception letting a
 compound exceed COMPOUNDWORDMAX) and the LANG_hu \"moving rule\" for
-COMPOUNDFORBIDFLAG are not implemented, per the Commentary in
+COMPOUNDFORBIDFLAG are not implemented, per the LLM notes to self in
 vibe-spell.el.")
-    ("vibe-spell-test-hunspell-i54980" .
+    (vibe-spell-test-hunspell-i54980 .
      "Dictionary declares a non-UTF-8 SET encoding (ISO8859-15); that
 declared encoding is not separately consulted, per the Commentary in
 vibe-spell.el.")
-    ("vibe-spell-test-hunspell-limit-multiple-compounding" .
+    (vibe-spell-test-hunspell-limit-multiple-compounding .
      "Tests a Hunspell-specific heuristic rejecting a 3-or-more-part compound
 that is a near-typo of an unrelated, longer dictionary word; Nuspell's
 checker, which this ports, has no such heuristic.")
-    ("vibe-spell-test-hunspell-morph" .
+    (vibe-spell-test-hunspell-morph .
      "The .good file's multi-word lines (e.g. \"drink eat\") exercise
 Hunspell's own CLI, which checks a line word by word; `vibe-spell-check'
 only ever checks one word, like `Hunspell_spell' itself, so this test
 harness's one-call-per-line reading does not apply here.")
-    ("vibe-spell-test-hunspell-nepali" .
+    (vibe-spell-test-hunspell-nepali .
      "Tests ICONV/IGNORE normalization of ZWJ/ZWNJ in Devanagari conjuncts;
 this port's substring replacer does not reproduce Hunspell's exact
 normalization here.")
-    ("vibe-spell-test-hunspell-onlyincompound2" .
+    (vibe-spell-test-hunspell-onlyincompound2 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-opentaal_cpdpat" .
+    (vibe-spell-test-hunspell-opentaal_cpdpat .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-opentaal_cpdpat2" .
+    (vibe-spell-test-hunspell-opentaal_cpdpat2 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-ph2" .
+    (vibe-spell-test-hunspell-ph2 .
      "A dictionary entry with an embedded space (e.g. \"forbidden root\") is
 meant to block the squished-together compound from also being
 accepted; this multi-word .dic entry mechanism is not implemented
 \(same gap as the wordpair test).")
-    ("vibe-spell-test-hunspell-simplifiedtriple" .
+    (vibe-spell-test-hunspell-simplifiedtriple .
      "SIMPLIFIEDTRIPLE's extra \"insert the elided letter back and retry\"
-fallback is not implemented, per the Commentary in vibe-spell.el.")
-    ("vibe-spell-test-hunspell-trace_compound" .
+fallback is not implemented, per the LLM notes to self in vibe-spell.el.")
+    (vibe-spell-test-hunspell-trace_compound .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    ("vibe-spell-test-hunspell-wordpair" .
+    (vibe-spell-test-hunspell-wordpair .
      "A dictionary entry with an embedded space (e.g. \"compound word\") is
 meant to block the squished-together compound (\"compoundword\") from
 also being accepted; `-parse-dic-line' stops at the first whitespace,
 so this multi-word .dic entry mechanism is not implemented.")
-    ("vibe-spell-test-hunspell-suggest-base_utf" .
+    (vibe-spell-test-hunspell-suggest-base_utf .
      "Turkish dotless i (İ) casing; casing uses Emacs's own locale-unaware
 upcase/downcase, per the Commentary in vibe-spell.el.")
-    ("vibe-spell-test-hunspell-suggest-checksharpsutf" .
+    (vibe-spell-test-hunspell-suggest-checksharpsutf .
      "CHECKSHARPS (German sharp s) suggestion casing variants are narrower
-than Hunspell's own, per the Commentary in vibe-spell.el.")
-    ("vibe-spell-test-hunspell-suggest-opentaal_keepcase" .
+than Hunspell's own.")
+    (vibe-spell-test-hunspell-suggest-opentaal_keepcase .
      "KEEPCASE casing restoration for a multi-dash PASCAL-cased compound
 \(\"TV-word-TV\") only fixes one dash-part at a time, not both together."))
   "Alist of ERT test name (as a string) to why it is a known failure.
@@ -228,9 +228,9 @@ which is ERT's way of prompting this list to be updated.")
 
 (defun vibe-spell-tests--maybe-xfail (test-name)
   "Return the `:expected-result' spec for TEST-NAME (a symbol), or nil.
-Looks TEST-NAME up in `vibe-spell-tests-known-failures' by its print
-name; spliced into a generated `ert-deftest' form when non-nil."
-  (when (assoc (symbol-name test-name) vibe-spell-tests-known-failures)
+Looks TEST-NAME up in `vibe-spell-tests-known-failures'; spliced into
+a generated `ert-deftest' form when non-nil."
+  (when (assq test-name vibe-spell-tests-known-failures)
     '(:expected-result :failed)))
 
 (defun vibe-spell-tests--read-words (file)
@@ -502,6 +502,31 @@ left alone, since it has no personal (nil-flags) entry to remove."
                     (insert-file-contents pdict-file)
                     (not (string-search "zyzzyva" (buffer-string))))))
       (delete-directory tmpdir t))))
+
+;;;; Word regexp
+
+(defun vibe-spell-tests--words (dict text)
+  "Return the list of words of TEXT, according to `vibe-spell-word-regexp'."
+  (let ((re (vibe-spell-word-regexp dict))
+        (start 0) words)
+    (while (string-match re text start)
+      (push (match-string 0 text) words)
+      (setq start (match-end 0)))
+    (nreverse words)))
+
+(ert-deftest vibe-spell-test-word-regexp ()
+  "Check `vibe-spell-word-regexp' against a few WORDCHARS settings."
+  (let ((vibe-spell-dictionary-path (list vibe-spell-tests-hunspell-dir)))
+    ;; WORDCHARS .'’
+    (let ((dict (vibe-spell-create "base_utf")))
+      (should (eq (vibe-spell-word-regexp dict) (vibe-spell-word-regexp dict)))
+      (should (equal (vibe-spell-tests--words
+                      dict "'Quoted' don’t ‘it’ e.g. a Ünïcode-x2 _a_")
+                     '("Quoted" "don’t" "it" "e.g." "Ünïcode"))))
+    ;; WORDCHARS -–
+    (let ((dict (vibe-spell-create "break")))
+      (should (equal (vibe-spell-tests--words dict "-foo-bar– don't --")
+                     '("foo-bar" "don"))))))
 
 (provide 'vibe-spell-tests)
 ;;; vibe-spell-tests.el ends here

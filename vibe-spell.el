@@ -1,4 +1,4 @@
-;;; vibe-spell.el --- Hunspell-compatible spell checking  -*- lexical-binding: t; -*-
+;;; vibe-spell.el --- Hunspell-compatible spell checker  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026  Augusto Stoffel
 
@@ -23,73 +23,30 @@
 
 ;;; Commentary:
 
-;; An Emacs Lisp port of the word-checking algorithm of Nuspell
-;; (https://github.com/nuspell/nuspell), a C++ reimplementation of
-;; Hunspell.  Nuspell was chosen over Hunspell as the porting base
-;; because its checking code is organized as small, separately named
-;; functions with little incidental state, which maps much more
-;; directly onto Lisp than Hunspell's.
+;; An Emacs Lisp port of the word-checking and suggestion algorithms of
+;; Nuspell (https://github.com/nuspell/nuspell), a C++ reimplementation
+;; of Hunspell.  It reads Hunspell dictionaries (.aff and .dic files)
+;; and provides `vibe-spell-check' and `vibe-spell-suggest', plus a
+;; personal word list (`vibe-spell-add-word', `vibe-spell-remove-word').
 ;;
-;; Both checking (`vibe-spell-check') and suggestions
-;; (`vibe-spell-suggest') are implemented, the latter following
-;; Nuspell's `Suggester' (with occasional reference to Hunspell's own
-;; `SuggestMgr' for comparison).  The following simplifications were
-;; made relative to upstream Nuspell:
+;; Known limitations:
 ;;
 ;; - Dictionaries that set COMPLEXPREFIXES (double prefix stripping,
 ;;   used by a handful of languages) are rejected at `vibe-spell-create'
 ;;   time.
-;; - CHECKCOMPOUNDREP, which consults the REP table, is accepted but
-;;   has no effect, same as in the checking-only port below it.
-;; - CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not
-;;   enforced.
-;; - PHONE (phonetic suggestions, a Hunspell-only feature that
-;;   Nuspell's own `Suggester' never calls either) is not parsed.
-;; - MAXCPDSUGS, SUBSTANDARD, NOSPLITSUGS and SUGSWITHDOTS are not
-;;   parsed; Nuspell itself parses these but its `Suggester' never
-;;   consults them, so they would have no effect here either.
-;; - Nuspell's suggestion-casing-fix loop, which moves a
-;;   newly-recased, space-containing CAMEL/PASCAL suggestion to the
-;;   front of the list one at a time, is instead done as a single
-;;   stable partition (recased suggestions first, in their original
-;;   relative order); when more than one suggestion qualifies, their
-;;   relative order can come out differently than upstream's.
-;; - `-move-char-suggest' and `-distant-swap-suggest' enumerate
-;;   candidate character moves/swaps directly instead of Nuspell's
-;;   swap-and-revert traversal; the budget used to cap either
-;;   algorithm is still consulted once per candidate, as upstream
-;;   does, but exhausting it while moving through backward moves,
-;;   candidates that upstream's forward-then-backward traversal order
-;;   would have tried first may be skipped instead.
-;; - SIMPLIFIEDTRIPLE's extra "insert the elided letter back and
-;;   retry" fallback is not implemented; CHECKCOMPOUNDTRIPLE itself is.
-;; - COMPOUNDSYLLABLE/SYLLABLENUM, the Hungarian-specific syllable
-;;   counting rules that let a compound exceed COMPOUNDWORDMAX, are not
-;;   implemented; COMPOUNDWORDMAX is always a hard cap.
 ;; - LANG-specific casing rules (e.g. Turkish dotless i) are not
 ;;   implemented; casing uses Emacs's own `upcase'/`downcase'.
-;; - Morphological fields in .dic and the AM directive are ignored,
-;;   same as in Nuspell itself.
-;; - FULLSTRIP is parsed but has no effect, matching Nuspell's own
-;;   (apparently unused) implementation of it.
 ;; - Dictionary files are read using Emacs's own file-decoding; the
 ;;   SET directive's declared encoding is not separately consulted.
-;; - The 360-character length limit in `vibe-spell-check' is counted in
-;;   characters rather than UTF-8 bytes.  Also, unlike Nuspell, a word
-;;   over the limit is treated as correctly spelled rather than as a
-;;   misspelling, so that long non-word tokens are not flagged as
-;;   errors.
-;;
-;; For affix stripping, Nuspell tries combinations of up to one prefix
-;; and up to two suffixes (or vice versa); this port implements that
-;; same set of combinations.  A small number of Nuspell's own
-;; performance-only early-exit checks (annotated as such in its
-;; sources) are omitted here, since they do not affect correctness.
+;; - PHONE (phonetic suggestions, a Hunspell-only feature) is not
+;;   supported.
+;; - Words longer than 360 characters are treated as correctly spelled,
+;;   rather than as misspellings, so that long non-word tokens are not
+;;   flagged as errors; no suggestions are attempted for them.
 
 ;;; Code:
 
 (require 'cl-lib)
-(require 'xdg)
 
 (defgroup vibe-spell nil
   "Hunspell-compatible spell checking library in pure Emacs Lisp."
@@ -97,20 +54,57 @@
   :group 'text)
 
 (defcustom vibe-spell-dictionary-path
-  (mapcar (lambda (d) (expand-file-name "hunspell/" d))
-          (cons (xdg-data-home) (xdg-data-dirs)))
+  (append
+   (parse-colon-path (getenv "DICPATH"))
+   (if (memq system-type '(windows-nt ms-dos))
+       (append
+        (mapcan (lambda (var)
+                  (when-let* ((d (getenv var)))
+                    (list (expand-file-name "hunspell/" d))))
+                '("LOCALAPPDATA" "APPDATA" "PROGRAMDATA"))
+        '("C:/Hunspell/"))
+     (require 'xdg)
+     (declare-function xdg-data-home "xdg")
+     (declare-function xdg-data-dirs "xdg")
+     (cons (expand-file-name "hunspell/" (xdg-data-home))
+           (mapcan (lambda (sub)
+                     (mapcar (lambda (d) (expand-file-name sub d))
+                             (xdg-data-dirs)))
+                   '("hunspell/" "myspell/"))))
+   (when (eq system-type 'darwin)
+     (list (expand-file-name "~/Library/Spelling/")
+           "/Library/Spelling/")))
   "List of directories to search for dictionaries.
 Given a dictionary NAME, we expect to find files NAME.aff and NAME.dic
-in one of those directories."
+in one of those directories.
+
+The default follows the search path of the Hunspell and Nuspell
+command-line tools: the directories listed in the DICPATH environment
+variable, then system-dependent locations; on Unix-like systems these
+are the hunspell/ and myspell/ subdirectories of the XDG data
+directories."
   :type '(repeat directory))
 
 (defcustom vibe-spell-personal-dictionary-format
-  (list (expand-file-name "vibe-spell/%s" user-emacs-directory)
-        (expand-file-name "~/hunspell_%s"))
-  "Name pattern of personal directories.
+  (append
+   (when-let* ((file (getenv "WORDLIST")))
+     (list (string-replace "%" "%%" (expand-file-name file "~/"))))
+   (list (expand-file-name "vibe-spell/%s" user-emacs-directory))
+   (pcase system-type
+     ((or 'windows-nt 'ms-dos)
+      (when-let* ((home (getenv "USERPROFILE")))
+        (list (expand-file-name "hunspell_%s" home))))
+     (_ (list (expand-file-name "~/.hunspell_%s")))))
+  "Name pattern of personal dictionaries.
 Each string is passed to `format' with the dictionary name as argument.
 The first file to be found is used to save additional words.  If none of
-the files exist, create one from the first item of the list."
+the files exist, create one from the first item of the list.
+
+The default includes the personal dictionaries of the Hunspell
+command-line tool: the file named by the WORDLIST environment variable,
+if set, relative to the home directory; and the per-dictionary default,
+~/.hunspell_NAME on Unix-like systems or %USERPROFILE%\\hunspell_NAME
+on Windows."
   :type '(choice string (repeat string)))
 
 (defvar -max-word-length
@@ -188,6 +182,90 @@ with."
       (-remove-personal-word (-dict-pdict dict) word))
     removed))
 
+(defun vibe-spell-word-regexp (dict)
+  "Return a regexp matching the words of a text to check with DICT.
+DICT is a spell checker object created by `vibe-spell-create'.  The
+regexp matches a run of two or more word characters: letters (in the
+sense of `[:alpha:]', which includes combining marks) plus the
+characters listed in the dictionary's WORDCHARS directive.  Among the
+latter, apostrophes and dashes may only occur inside a word, so that,
+for instance, \\='quoted\\=' and -dashed- match without the
+surrounding punctuation.  If WORDCHARS lists either the ASCII
+apostrophe or the typographic one (U+2019), both are accepted.
+
+The regexp is computed when DICT is created, so calling this
+repeatedly is cheap."
+  (-dict-word-regexp dict))
+
+;;; LLM notes to self
+
+;; Nuspell was chosen over Hunspell as the porting base because its
+;; checking code is organized as small, separately named functions with
+;; little incidental state, which maps much more directly onto Lisp than
+;; Hunspell's.  Suggestions follow Nuspell's `Suggester', with
+;; occasional reference to Hunspell's own `SuggestMgr' for comparison.
+;;
+;; Besides the limitations listed in the Commentary, the following
+;; simplifications were made relative to upstream Nuspell:
+;;
+;; - CHECKCOMPOUNDREP, which consults the REP table, is accepted but
+;;   has no effect.
+;; - CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not
+;;   enforced.
+;; - PHONE is not parsed; Nuspell's own `Suggester' never calls it
+;;   either.
+;; - MAXCPDSUGS, SUBSTANDARD, NOSPLITSUGS and SUGSWITHDOTS are not
+;;   parsed; Nuspell itself parses these but its `Suggester' never
+;;   consults them, so they would have no effect here either.
+;; - Nuspell's suggestion-casing-fix loop, which moves a
+;;   newly-recased, space-containing CAMEL/PASCAL suggestion to the
+;;   front of the list one at a time, is instead done as a single
+;;   stable partition (recased suggestions first, in their original
+;;   relative order); when more than one suggestion qualifies, their
+;;   relative order can come out differently than upstream's.
+;; - `-move-char-suggest' and `-distant-swap-suggest' enumerate
+;;   candidate character moves/swaps directly instead of Nuspell's
+;;   swap-and-revert traversal; the budget used to cap either
+;;   algorithm is still consulted once per candidate, as upstream
+;;   does, but exhausting it while moving through backward moves,
+;;   candidates that upstream's forward-then-backward traversal order
+;;   would have tried first may be skipped instead.
+;; - SIMPLIFIEDTRIPLE's extra "insert the elided letter back and
+;;   retry" fallback is not implemented; CHECKCOMPOUNDTRIPLE itself is.
+;; - COMPOUNDSYLLABLE/SYLLABLENUM, the Hungarian-specific syllable
+;;   counting rules that let a compound exceed COMPOUNDWORDMAX, are not
+;;   implemented; COMPOUNDWORDMAX is always a hard cap.  Neither is the
+;;   LANG hu "moving rule" for COMPOUNDFORBIDFLAG.
+;; - Morphological fields in .dic and the AM directive are ignored,
+;;   same as in Nuspell itself.
+;; - FULLSTRIP is parsed but has no effect, matching Nuspell's own
+;;   (apparently unused) implementation of it.
+;; - The 360-character length limit is counted in characters rather
+;;   than UTF-8 bytes, and a word over the limit is accepted rather
+;;   than rejected.
+;;
+;; For affix stripping, Nuspell tries combinations of up to one prefix
+;; and up to two suffixes (or vice versa); this port implements that
+;; same set of combinations.  A small number of Nuspell's own
+;; performance-only early-exit checks (annotated as such in its
+;; sources) are omitted here, since they do not affect correctness.
+;;
+;; Where Nuspell and Hunspell disagree, this port follows Nuspell.
+;; Known cases seen on real dictionaries:
+;;
+;; - COMPOUNDRULE: Nuspell (`Checker::check_compound_with_rules') looks
+;;   up each part as a bare dictionary word; Hunspell also lets the
+;;   last part take suffixes (hunspell(5): "COMPOUNDRULE only handles
+;;   the suffixation of the last word part").  The Korean dictionary
+;;   relies on this for noun + particle forms such as 사람들이, which
+;;   Hunspell accepts and Nuspell and this port reject.
+;; - FLAG UTF-8 flags above U+FFFF: Hunspell stores flags in 16 bits
+;;   and decodes every such character to U+FFFD, so all of them
+;;   collapse into one flag; Nuspell rejects the dictionary outright
+;;   (FLAG_ABOVE_65535).  This port keeps full code points, i.e. reads
+;;   the dictionary as written.  es_ES (Debian) uses three emoji flags,
+;;   so e.g. "audacísimo" is accepted only by Hunspell.
+
 ;;; Implementation
 
 ;;;; Helpers
@@ -255,6 +333,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
   (flag-aliases nil)                   ; vector of flag lists, alias N at index N-1
   (flag-type 'single-char)
   (ignored-chars "")
+  (word-regexp nil)                    ; see `vibe-spell-word-regexp'
   (complex-prefixes nil)
   (fullstrip nil)
   (checksharps nil)
@@ -283,7 +362,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
   (keyboard-closeness "")
   (rep-whole nil) (rep-start nil) (rep-end nil) (rep-any nil)
   (similarities nil)                   ; list of `-similarity-group'
-  (input-iconv nil)                    ; sorted list of (FROM . TO), see `-substr-replace'
+  (input-iconv nil)                    ; see `-build-substr-replacer'
   (output-oconv nil)
   (nosuggest-flag 0)
   (max-ngram-suggestions 4)
@@ -1824,8 +1903,8 @@ space does not already end in the same case as WORD has that part's
 first character upcased, and is moved to the front of BOX.  Used for
 CAMEL/PASCAL-cased input.  Loosely mirrors the casing-fix loop in
 Nuspell's `Suggester::suggest_priv' (ties among several qualifying
-suggestions are broken differently; see the Commentary at the top of
-this file)."
+suggestions are broken differently; see the LLM notes to self near
+the top of this file)."
   (let (fixed rest)
     (dolist (sug (-sugs-list box))
       (let ((space (string-search " " sug)))
@@ -2216,34 +2295,50 @@ Nuspell's `Replacement_Table::order_entries'."
 
 (defun -build-substr-replacer (pairs)
   "Build an ICONV/OCONV substitution table from (FROM . TO) PAIRS.
-Entries with an empty FROM are dropped; see `-substr-replace'."
-  (cl-remove-if (lambda (p) (string-empty-p (car p))) pairs))
+Return nil if there are no pairs, otherwise a hash table mapping each
+character to the pairs whose FROM starts with it, longest FROM first;
+pairs with equal FROM keep their order in PAIRS, so the first one
+wins.  Entries with an empty FROM are dropped; see `-substr-replace'."
+  (let ((table (make-hash-table)))
+    (dolist (p (reverse pairs))
+      (unless (string-empty-p (car p))
+        (push p (gethash (aref (car p) 0) table))))
+    (when (> (hash-table-count table) 0)
+      (maphash (lambda (c ps)
+                 (puthash c (sort ps :key (lambda (p) (length (car p))) :reverse t)
+                          table))
+               table)
+      table)))
 
 (defun -substr-replacer-find (table s i)
   "Return the (FROM . TO) entry of TABLE whose FROM is the longest match
 at position I of S, or nil if none matches there."
-  (let (best)
-    (dolist (p table)
-      (let ((from (car p)))
-        (when (and (<= (+ i (length from)) (length s))
-                   (or (not best) (> (length from) (length (car best))))
-                   (string= from (substring s i (+ i (length from)))))
-          (setq best p))))
-    best))
+  (let ((len (length s)))
+    (-dolist-until (p (gethash (aref s i) table))
+      (let ((end (+ i (length (car p)))))
+        (and (<= end len)
+             (eq t (compare-strings (car p) nil nil s i end))
+             p)))))
 
 (defun -substr-replace (table s)
   "Apply TABLE's longest-match-at-each-position substitutions throughout S.
-Mirrors Nuspell's `Substr_Replacer', used for ICONV/OCONV."
+Return S itself if nothing matches.  Mirrors Nuspell's
+`Substr_Replacer', used for ICONV/OCONV."
   (if (null table)
       s
-    (let ((i 0) (len (length s)) parts)
+    (let ((i 0) (start 0) (len (length s)) parts)
       (while (< i len)
         (let ((m (-substr-replacer-find table s i)))
-          (if m
-              (progn (push (cdr m) parts) (setq i (+ i (length (car m)))))
-            (push (substring s i (1+ i)) parts)
-            (setq i (1+ i)))))
-      (apply #'concat (nreverse parts)))))
+          (if (not m)
+              (incf i)
+            (when (< start i) (push (substring s start i) parts))
+            (push (cdr m) parts)
+            (setq i (+ i (length (car m)))
+                  start i))))
+      (if (null parts)
+          s
+        (when (< start len) (push (substring s start) parts))
+        (apply #'concat (nreverse parts))))))
 
 (defun -parse-aff-affix-line (dict command args cmd-affix)
   "Process one PFX/SFX line.  Return a new affix struct, or nil."
@@ -2275,6 +2370,20 @@ Mirrors Nuspell's `Substr_Replacer', used for ICONV/OCONV."
                               :stripping stripping :appending appending
                               :cont-flags cont-flags :condition condition))))))))
 
+(defun -make-word-regexp (wordchars)
+  "Return the regexp described in `vibe-spell-word-regexp'.
+WORDCHARS is the value of the dictionary's WORDCHARS directive."
+  (let (edge inner)
+    (dotimes (i (length wordchars))
+      (let ((c (aref wordchars i)))
+        (cond ((memq c '(?' ?’)) (setq inner (append '(?' ?’) inner)))
+              ((eq (get-char-code-property c 'general-category) 'Pd) (push c inner))
+              (t (push c edge)))))
+    (rx-to-string `(seq (any alpha ,@edge)
+                        (* (any alpha ,@edge ,@inner))
+                        (any alpha ,@edge))
+                  t)))
+
 (defun -parse-aff (dict file)
   "Parse .aff FILE into DICT."
   (with-temp-buffer
@@ -2285,6 +2394,7 @@ Mirrors Nuspell's `Substr_Replacer', used for ICONV/OCONV."
           (compound-rules nil) (flag-aliases nil)
           (rep-pairs nil) (similarities nil)
           (iconv-pairs nil) (oconv-pairs nil)
+          (wordchars "")
           (cmd-affix (make-hash-table :test 'equal))
           (cmd-counts (make-hash-table :test 'equal)))
       (while (not (eobp))
@@ -2311,6 +2421,8 @@ Mirrors Nuspell's `Substr_Replacer', used for ICONV/OCONV."
                 (setf (-dict-ignored-chars dict) (car args)))
                ((string= command "TRY")
                 (setf (-dict-try-chars dict) (car args)))
+               ((string= command "WORDCHARS")
+                (setq wordchars (car args)))
                ((string= command "KEY")
                 (setf (-dict-keyboard-closeness dict) (car args)))
                ((string= command "COMPLEXPREFIXES")
@@ -2430,7 +2542,8 @@ Mirrors Nuspell's `Substr_Replacer', used for ICONV/OCONV."
         (setf (-dict-rep-any dict) any))
       (setf (-dict-similarities dict) (nreverse similarities))
       (setf (-dict-input-iconv dict) (-build-substr-replacer (nreverse iconv-pairs)))
-      (setf (-dict-output-oconv dict) (-build-substr-replacer (nreverse oconv-pairs))))))
+      (setf (-dict-output-oconv dict) (-build-substr-replacer (nreverse oconv-pairs)))
+      (setf (-dict-word-regexp dict) (-make-word-regexp wordchars)))))
 
 ;;;; Personal dictionary
 
