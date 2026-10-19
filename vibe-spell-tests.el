@@ -33,7 +33,7 @@
 ;; `vibe-spell-suggest' includes at least one of NAME.sug's expected
 ;; alternatives for each corresponding word of NAME.wrong -- see
 ;; `vibe-spell-tests--check-suggest' for how the two files are paired
-;; up position by position, and when that is not possible.  This is a
+;; up.  This is a
 ;; looser check than Hunspell's own test.sh, which requires the exact
 ;; suggestion list hunspell itself produces: `vibe-spell-suggest' is a
 ;; Nuspell-derived port and is not expected to reproduce Hunspell's own
@@ -44,13 +44,10 @@
 ;; (morphological analysis) and NAME.trace (affix trace) -- are not
 ;; checked, since vibe-spell does not implement morphological
 ;; analysis.  Dictionaries that `vibe-spell-create' refuses outright
-;; (currently, only ones using COMPLEXPREFIXES) are reported as
-;; skipped rather than failed; see the Commentary in vibe-spell.el for
-;; this and other limitations of this port that may cause some
-;; dictionaries' good/wrong words, or suggestions, to be misclassified,
-;; such as encodings other than UTF-8 or ASCII, or PHONE (phonetic
-;; suggestions, which vibe-spell-suggest does not implement; see
-;; `vibe-spell-tests-suggest-skip-dictionaries').
+;; (currently, only ones using COMPLEXPREFIXES) fail; see the
+;; Commentary in vibe-spell.el for this and other limitations of this
+;; port that may cause some dictionaries' good/wrong words, or
+;; suggestions, to be misclassified.
 ;;
 ;; A handful of the tests this generates are known to fail outright --
 ;; some because of limitations already documented in vibe-spell.el,
@@ -115,6 +112,9 @@ dictionary's test runs directly in the ERT runner's own process.")
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
     (vibe-spell-test-hunspell-2970242 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+    (vibe-spell-test-hunspell-alias3 .
+     "COMPLEXPREFIXES is not supported; `vibe-spell-create' refuses the
+dictionary, per the Commentary in vibe-spell.el.")
     (vibe-spell-test-hunspell-base_utf .
      "Turkish dotless i (İ/ı) casing; casing uses Emacs's own locale-unaware
 upcase/downcase, per the Commentary in vibe-spell.el.")
@@ -140,6 +140,15 @@ point fails here too.")
     (vibe-spell-test-hunspell-checkcompoundrep .
      "CHECKCOMPOUNDREP is accepted but has no effect, per the LLM notes to
 self in vibe-spell.el.")
+    (vibe-spell-test-hunspell-complexprefixes .
+     "COMPLEXPREFIXES is not supported; `vibe-spell-create' refuses the
+dictionary, per the Commentary in vibe-spell.el.")
+    (vibe-spell-test-hunspell-complexprefixes2 .
+     "COMPLEXPREFIXES is not supported; `vibe-spell-create' refuses the
+dictionary, per the Commentary in vibe-spell.el.")
+    (vibe-spell-test-hunspell-complexprefixesutf .
+     "COMPLEXPREFIXES is not supported; `vibe-spell-create' refuses the
+dictionary, per the Commentary in vibe-spell.el.")
     (vibe-spell-test-hunspell-compoundforbid .
      "COMPOUNDFORBIDFLAG on a direct .dic entry (\"foobaz/Z\") has no effect
 on an unrelated derivation of the same string from a different root
@@ -151,10 +160,6 @@ semantics, not something specific to this port.")
     (vibe-spell-test-hunspell-dotless_i .
      "Turkish dotless i (İ/ı) casing (LANG tr); casing uses Emacs's own
 locale-unaware upcase/downcase, per the Commentary in vibe-spell.el.")
-    (vibe-spell-test-hunspell-encoding .
-     "Dictionary declares a non-UTF-8 SET encoding (ISO-8859-15); that
-declared encoding is not separately consulted, per the Commentary in
-vibe-spell.el.")
     (vibe-spell-test-hunspell-gh106 .
      "Tests a Hunspell-specific fix for case-insensitive affix conditions on
 PASCAL-cased words; Nuspell's checker, which this ports, never retries
@@ -172,10 +177,6 @@ upstream too.")
      "Hungarian COMPOUNDSYLLABLE/SYLLABLENUM (the exception letting a
 compound exceed COMPOUNDWORDMAX) and the LANG_hu \"moving rule\" for
 COMPOUNDFORBIDFLAG are not implemented, per the LLM notes to self in
-vibe-spell.el.")
-    (vibe-spell-test-hunspell-i54980 .
-     "Dictionary declares a non-UTF-8 SET encoding (ISO8859-15); that
-declared encoding is not separately consulted, per the Commentary in
 vibe-spell.el.")
     (vibe-spell-test-hunspell-limit-multiple-compounding .
      "Tests a Hunspell-specific heuristic rejecting a 3-or-more-part compound
@@ -214,13 +215,33 @@ so this multi-word .dic entry mechanism is not implemented.")
     (vibe-spell-test-hunspell-suggest-base_utf .
      "Turkish dotless i (İ) casing; casing uses Emacs's own locale-unaware
 upcase/downcase, per the Commentary in vibe-spell.el.")
+    (vibe-spell-test-hunspell-suggest-checksharps .
+     "CHECKSHARPS (German sharp s) suggestion casing variants are narrower
+than Hunspell's own; Nuspell's test suite marks this one as failing
+too.")
     (vibe-spell-test-hunspell-suggest-checksharpsutf .
      "CHECKSHARPS (German sharp s) suggestion casing variants are narrower
 than Hunspell's own.")
+    (vibe-spell-test-hunspell-suggest-gh1002 .
+     "OCONV is applied to finished suggestions, as in Nuspell, so one can
+end up equal to the misspelled word itself (\"románórum\" becomes
+\"romanórum\"); Hunspell drops such a suggestion, Nuspell does not.")
+    (vibe-spell-test-hunspell-suggest-nosuggest .
+     "NOSUGGEST only filters n-gram suggestions, as in Nuspell, whose
+`add_sug_if_correct' ignores it; Nuspell's test suite marks this one
+as failing too.")
     (vibe-spell-test-hunspell-suggest-opentaal_keepcase .
      "KEEPCASE casing restoration for a multi-dash PASCAL-cased compound
-\(\"TV-word-TV\") only fixes one dash-part at a time, not both together."))
-  "Alist of ERT test name (as a string) to why it is a known failure.
+\(\"TV-word-TV\") only fixes one dash-part at a time, not both together.")
+    (vibe-spell-test-hunspell-suggest-ph .
+     "Hunspell turns ph: fields of .dic entries (known misspellings of a
+word) into suggestions; like Nuspell, this port ignores morphological
+fields, and PHONE is not implemented either.")
+    (vibe-spell-test-hunspell-suggest-ph2 .
+     "Hunspell turns ph: fields of .dic entries (known misspellings of a
+word) into suggestions; like Nuspell, this port ignores morphological
+fields."))
+  "Alist of ERT test name (a symbol) to why it is a known failure.
 Tests named here are declared with `:expected-result :failed'; see
 `vibe-spell-tests--maybe-xfail'.  A test listed here that starts
 passing is itself reported as a failure (an \"unexpected pass\"),
@@ -245,8 +266,8 @@ Return nil if FILE does not exist."
   "Check hunspell test NAME's .good/.wrong word lists against vibe-spell.
 NAME is looked up as NAME.aff/NAME.dic/NAME.good/NAME.wrong under
 `vibe-spell-tests-hunspell-dir'.  Return nil if everything checks out,
-or (STATUS . MESSAGE) where STATUS is `skip' (`vibe-spell-create'
-itself failed) or `fail' (some word was misclassified)."
+or (fail . MESSAGE) if `vibe-spell-create' itself failed or some
+word was misclassified."
   (cl-block nil
     (let ((vibe-spell-dictionary-path (list vibe-spell-tests-hunspell-dir))
           (good-file (expand-file-name (concat name ".good") vibe-spell-tests-hunspell-dir))
@@ -256,7 +277,7 @@ itself failed) or `fail' (some word was misclassified)."
           (setq dict (vibe-spell-create name))
         (error
          (cl-return-from nil
-           (cons 'skip (format "vibe-spell-create failed: %s" (error-message-string err))))))
+           (cons 'fail (format "vibe-spell-create failed: %s" (error-message-string err))))))
       (let ((bad-good (seq-remove (lambda (w) (vibe-spell-check dict w))
                                    (vibe-spell-tests--read-words good-file)))
             (bad-wrong (seq-filter (lambda (w) (vibe-spell-check dict w))
@@ -271,27 +292,27 @@ itself failed) or `fail' (some word was misclassified)."
                         (format "Wrong words accepted as correct: %S" bad-wrong))))
           nil)))))
 
-(defun vibe-spell-tests--run-case (name)
-  "Run the check for hunspell test NAME directly in this process."
-  (pcase (vibe-spell-tests--check name)
+(defun vibe-spell-tests--run-case (checker name)
+  "Run CHECKER for hunspell test NAME directly in this process.
+CHECKER is `vibe-spell-tests--check' or
+`vibe-spell-tests--check-suggest'."
+  (pcase (funcall checker name)
     ('nil t)
-    (`(skip . ,msg) (ert-skip msg))
     (`(fail . ,msg) (ert-fail msg))))
 
-(defun vibe-spell-tests--subprocess-check (name)
-  "Print \"OK\", \"SKIP:MESSAGE\" or \"FAIL:MESSAGE\" for hunspell test NAME.
+(defun vibe-spell-tests--subprocess-check (checker name)
+  "Print \"OK\" or \"FAIL:MESSAGE\" for CHECKER on hunspell test NAME.
 This is the entry point run, by `vibe-spell-tests--run-case-subprocess',
 in a subprocess that is externally time-limited; it does not itself
 know or care about that time limit."
-  (pcase (vibe-spell-tests--check name)
+  (pcase (funcall checker name)
     ('nil (princ "OK"))
-    (`(skip . ,msg) (princ (format "SKIP:%s" msg)))
     (`(fail . ,msg) (princ (format "FAIL:%s" msg)))))
 
-(defun vibe-spell-tests--run-case-subprocess (name)
-  "Run `vibe-spell-tests--subprocess-check' for NAME in its own subprocess.
-The subprocess is killed, and this is reported as a skip, if it does
-not finish within `vibe-spell-tests-timeout'."
+(defun vibe-spell-tests--run-case-subprocess (checker name)
+  "Run `vibe-spell-tests--subprocess-check' for CHECKER and NAME.
+It runs in its own subprocess, which is killed, and this is reported
+as a skip, if it does not finish within `vibe-spell-tests-timeout'."
   (let* ((timeout-bin (or (executable-find "timeout")
                            (error "vibe-spell-tests: `timeout' utility not found")))
          (emacs-bin (or (executable-find "emacs")
@@ -300,7 +321,8 @@ not finish within `vibe-spell-tests-timeout'."
                      emacs-bin "-Q" "--batch"
                      "-L" vibe-spell-tests-project-dir
                      "-l" "vibe-spell-tests"
-                     "--eval" (format "(vibe-spell-tests--subprocess-check %S)" name)))
+                     "--eval" (format "(vibe-spell-tests--subprocess-check #'%s %S)"
+                                    checker name)))
          (buf (generate-new-buffer " *vibe-spell-tests-subprocess*"))
          (status nil))
     (unwind-protect
@@ -309,9 +331,8 @@ not finish within `vibe-spell-tests-timeout'."
           (let ((output (with-current-buffer buf (buffer-string))))
             (cond
              ((= status 124)
-              (ert-skip (format "checking did not finish within %ds"
+              (ert-skip (format "did not finish within %ds"
                                  vibe-spell-tests-timeout)))
-             ((string-prefix-p "SKIP:" output) (ert-skip (substring output 5)))
              ((string-prefix-p "FAIL:" output) (ert-fail (substring output 5)))
              ((string-prefix-p "OK" output) t)
              (t (ert-fail (format "subprocess exited %s with unexpected output:\n%s"
@@ -333,57 +354,41 @@ not finish within `vibe-spell-tests-timeout'."
               ,(format "Check hunspell/tests/%s.{good,wrong} with vibe-spell." name)
               ,@(vibe-spell-tests--maybe-xfail test-name)
               (if (member ,name vibe-spell-tests-subprocess-dictionaries)
-                  (vibe-spell-tests--run-case-subprocess ,name)
-                (vibe-spell-tests--run-case ,name)))
+                  (vibe-spell-tests--run-case-subprocess #'vibe-spell-tests--check ,name)
+                (vibe-spell-tests--run-case #'vibe-spell-tests--check ,name)))
            t))))))
 
 (vibe-spell-tests--define-hunspell-tests)
 
 ;;;; Suggestions
 
-(defconst vibe-spell-tests-suggest-skip-dictionaries '("ph" "ph2" "phone")
-  "Hunspell test dictionaries whose .sug expectations rely on PHONE
-\(phonetic) suggestions, which `vibe-spell-suggest' does not
-implement; see the Commentary at the top of vibe-spell.el.")
-
 (defun vibe-spell-tests--read-lines (file)
   "Return FILE's lines as a list of strings, or nil if FILE does not exist.
 Unlike `vibe-spell-tests--read-words', this keeps each line's
-whitespace intact and preserves blank lines, except for the single
-trailing blank line produced by splitting a file that, as is
-conventional, ends in a newline."
+whitespace intact and preserves blank lines, except for trailing
+ones, which Hunspell's own test script ignores too."
   (when (file-exists-p file)
     (with-temp-buffer
       (insert-file-contents file)
       (let ((lines (mapcar (lambda (l) (string-trim-right l "[ \t\r]+"))
                             (split-string (buffer-string) "\n"))))
-        (if (and lines (string-empty-p (car (last lines))))
-            (butlast lines)
-          lines)))))
+        (nreverse (drop-while #'string-empty-p (nreverse lines)))))))
 
 (defun vibe-spell-tests--check-suggest (name)
   "Check hunspell test NAME's .wrong/.sug word lists against vibe-spell.
 NAME is looked up as NAME.aff/NAME.dic/NAME.wrong/NAME.sug under
-`vibe-spell-tests-hunspell-dir'.  Hunspell's own .sug files have one
-line per word of the matching .wrong file, except that a word for
-which Hunspell itself finds no suggestion at all has its line dropped
-instead of left blank, which misaligns the two files by position for
-any .wrong word after the first such drop; since this port has no way
-to tell such a drop apart from a genuine difference in line count, NAME
-is skipped whenever its .wrong and .sug do not have the same number of
-lines.  A non-blank .sug line may list several Hunspell-acceptable
+`vibe-spell-tests-hunspell-dir'.  Like Hunspell's own test script,
+which keeps only the \"&\" lines of `hunspell -a', this pairs the
+.sug lines, in order, with the .wrong words that are misspelled and
+get at least one suggestion; a different number of such words is a
+failure.  A .sug line may list several Hunspell-acceptable
 alternatives, comma-separated; this only requires `vibe-spell-suggest'
 to include at least one of them, not to match the whole list or its
 order -- `vibe-spell-suggest' is a Nuspell-derived port and is not
 expected to reproduce Hunspell's own suggestions verbatim.  Return nil
-if everything checks out, or (STATUS . MESSAGE) where STATUS is `skip'
-\(`vibe-spell-create' itself failed, NAME is a member of
-`vibe-spell-tests-suggest-skip-dictionaries', or the line counts did
-not match) or `fail' (some word's suggestions included none of its
-expected alternatives)."
+if everything checks out, or (fail . MESSAGE) if `vibe-spell-create'
+itself failed or the suggestions did not match."
   (cl-block nil
-    (when (member name vibe-spell-tests-suggest-skip-dictionaries)
-      (cl-return-from nil (cons 'skip "relies on unimplemented PHONE suggestions")))
     (let ((vibe-spell-dictionary-path (list vibe-spell-tests-hunspell-dir))
           (wrong-file (expand-file-name (concat name ".wrong") vibe-spell-tests-hunspell-dir))
           (sug-file (expand-file-name (concat name ".sug") vibe-spell-tests-hunspell-dir))
@@ -392,32 +397,31 @@ expected alternatives)."
           (setq dict (vibe-spell-create name))
         (error
          (cl-return-from nil
-           (cons 'skip (format "vibe-spell-create failed: %s" (error-message-string err))))))
-      (let ((wrong-words (vibe-spell-tests--read-lines wrong-file))
-            (sug-lines (vibe-spell-tests--read-lines sug-file)))
-        (unless (= (length wrong-words) (length sug-lines))
+           (cons 'fail (format "vibe-spell-create failed: %s" (error-message-string err))))))
+      (let ((sug-lines (vibe-spell-tests--read-lines sug-file))
+            (suggested nil))
+        (dolist (word (vibe-spell-tests--read-lines wrong-file))
+          (unless (vibe-spell-check dict word)
+            (let ((got (vibe-spell-suggest dict word)))
+              (when got
+                (push (cons word got) suggested)))))
+        (setq suggested (nreverse suggested))
+        (unless (= (length suggested) (length sug-lines))
           (cl-return-from nil
-            (cons 'skip (format "%s.wrong has %d lines but %s.sug has %d; cannot pair them up"
-                                 name (length wrong-words) name (length sug-lines)))))
+            (cons 'fail (format "%d words got suggestions, but %s.sug has %d lines: %S"
+                                 (length suggested) name (length sug-lines) suggested))))
         (let (bad)
           (cl-mapc
-           (lambda (word expected)
-             (unless (string-empty-p expected)
-               (let ((alternatives (split-string expected ", " t))
-                     (got (vibe-spell-suggest dict word)))
-                 (unless (cl-intersection alternatives got :test #'string=)
-                   (push (format "%S: expected one of %S, got %S" word alternatives got) bad)))))
-           wrong-words sug-lines)
+           (lambda (entry expected)
+             (let ((alternatives (split-string expected ", " t)))
+               (unless (cl-intersection alternatives (cdr entry) :test #'string=)
+                 (push (format "%S: expected one of %S, got %S"
+                               (car entry) alternatives (cdr entry))
+                       bad))))
+           suggested sug-lines)
           (if bad
               (cons 'fail (string-join (nreverse bad) "\n"))
             nil))))))
-
-(defun vibe-spell-tests--run-case-suggest (name)
-  "Run the suggestion check for hunspell test NAME directly in this process."
-  (pcase (vibe-spell-tests--check-suggest name)
-    ('nil t)
-    (`(skip . ,msg) (ert-skip msg))
-    (`(fail . ,msg) (ert-fail msg))))
 
 (defun vibe-spell-tests--define-hunspell-suggest-tests ()
   "Define one `ert-deftest' per Hunspell test dictionary with a .sug file."
@@ -432,7 +436,10 @@ expected alternatives)."
            `(ert-deftest ,test-name ()
               ,(format "Check hunspell/tests/%s.{wrong,sug} with vibe-spell-suggest." name)
               ,@(vibe-spell-tests--maybe-xfail test-name)
-              (vibe-spell-tests--run-case-suggest ,name))
+              (if (member ,name vibe-spell-tests-subprocess-dictionaries)
+                  (vibe-spell-tests--run-case-subprocess
+                   #'vibe-spell-tests--check-suggest ,name)
+                (vibe-spell-tests--run-case #'vibe-spell-tests--check-suggest ,name)))
            t))))))
 
 (vibe-spell-tests--define-hunspell-suggest-tests)

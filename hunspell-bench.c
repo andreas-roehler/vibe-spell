@@ -1,4 +1,4 @@
-/* hunspell-bench-check.c --- apples-to-apples C benchmark for vibe-spell-bench.el
+/* hunspell-bench.c --- apples-to-apples C benchmark for vibe-spell-bench.el
  *
  * Measures how long Hunspell_create() takes to load a dictionary, and
  * how long Hunspell_spell() then takes to check every word of a file,
@@ -16,11 +16,17 @@
  * does no conversion of its own; some dictionaries (e.g. pt_BR) are
  * not UTF-8.
  *
- * Usage: hunspell-bench-check DICT-NAME FILE
- * DICT-NAME is looked up as /usr/share/hunspell/DICT-NAME.{aff,dic},
- * matching `vibe-spell-dictionary-path''s default.
+ * With --suggest, it also measures how long Hunspell_suggest() takes,
+ * called once for each misspelled word occurrence the check found, in
+ * a separately timed pass after it, as vibe-spell-bench.el does.
+ * With --lines N, only the first N lines of FILE are used.
  *
- * Build: make .tmp/hunspell-bench-check, which links against a static Hunspell built
+ * Usage: hunspell-bench [--suggest] [--lines N] DICT-NAME FILE
+ * DICT-NAME is looked up as data/DICT-NAME.{aff,dic}, relative to the
+ * current directory (the project directory, when run by make), the
+ * same files vibe-spell-bench.el loads.
+ *
+ * Build: make .tmp/hunspell-bench, which links against a static Hunspell built
  * from the hunspell/ source checkout.
  */
 
@@ -50,21 +56,42 @@ is_word_char(wchar_t wc)
 	return iswalpha((wint_t)wc) || wc == L'\'' || wc == L'-';
 }
 
+/* Counts kept while checking, and, with --suggest, the misspelled
+ * word occurrences (in the dictionary's encoding) to suggest for. */
+struct tally {
+	long word_count, correct_count;
+	int suggest;
+	char **misspelled;
+	long misspelled_count, misspelled_cap;
+};
+
 /* Check WORD (WLEN bytes, UTF-8), converting it to the dictionary's
  * own encoding via CD first unless CD is (iconv_t)-1 (dictionary is
- * already UTF-8).  Return non-zero if Hunspell considers it correct. */
-static int
-check_word(Hunhandle *h, iconv_t cd, char *word, size_t wlen)
+ * already UTF-8), and record the result in T. */
+static void
+count_word(Hunhandle *h, iconv_t cd, char *word, size_t wlen, struct tally *t)
 {
 	word[wlen] = '\0';
-	if (cd == (iconv_t)-1)
-		return Hunspell_spell(h, word);
 	char converted[1024];
-	char *in = word, *out = converted;
-	size_t inleft = wlen, outleft = sizeof converted - 1;
-	iconv(cd, &in, &inleft, &out, &outleft);
-	*out = '\0';
-	return Hunspell_spell(h, converted);
+	const char *w = word;
+	if (cd != (iconv_t)-1) {
+		char *in = word, *out = converted;
+		size_t inleft = wlen, outleft = sizeof converted - 1;
+		iconv(cd, &in, &inleft, &out, &outleft);
+		*out = '\0';
+		w = converted;
+	}
+	t->word_count++;
+	if (Hunspell_spell(h, w)) {
+		t->correct_count++;
+	} else if (t->suggest) {
+		if (t->misspelled_count == t->misspelled_cap) {
+			t->misspelled_cap = t->misspelled_cap ? 2 * t->misspelled_cap : 256;
+			t->misspelled = realloc(t->misspelled,
+			                        t->misspelled_cap * sizeof *t->misspelled);
+		}
+		t->misspelled[t->misspelled_count++] = strdup(w);
+	}
 }
 
 /* Read FILE fully into a NUL-terminated buffer; set *SIZE to its
@@ -74,18 +101,18 @@ read_file(const char *path, long *size)
 {
 	FILE *f = fopen(path, "rb");
 	if (!f) {
-		fprintf(stderr, "hunspell-bench-check: %s: %s\n", path, strerror(errno));
+		fprintf(stderr, "hunspell-bench: %s: %s\n", path, strerror(errno));
 		exit(1);
 	}
 	if (fseek(f, 0, SEEK_END) != 0) {
-		fprintf(stderr, "hunspell-bench-check: %s: cannot seek\n", path);
+		fprintf(stderr, "hunspell-bench: %s: cannot seek\n", path);
 		exit(1);
 	}
 	long len = ftell(f);
 	fseek(f, 0, SEEK_SET);
 	char *buf = malloc((size_t)len + 1);
 	if (!buf) {
-		fprintf(stderr, "hunspell-bench-check: out of memory\n");
+		fprintf(stderr, "hunspell-bench: out of memory\n");
 		exit(1);
 	}
 	size_t got = fread(buf, 1, (size_t)len, f);
@@ -98,27 +125,39 @@ read_file(const char *path, long *size)
 int
 main(int argc, char **argv)
 {
-	if (argc != 3) {
-		fprintf(stderr, "usage: %s DICT-NAME FILE\n", argv[0]);
+	int suggest = 0;
+	long lines = -1;
+	int argi = 1;
+	for (; argi < argc && strncmp(argv[argi], "--", 2) == 0; argi++) {
+		if (strcmp(argv[argi], "--suggest") == 0)
+			suggest = 1;
+		else if (strcmp(argv[argi], "--lines") == 0 && argi + 1 < argc)
+			lines = atol(argv[++argi]);
+		else
+			break;
+	}
+	if (argc - argi != 2) {
+		fprintf(stderr, "usage: %s [--suggest] [--lines N] DICT-NAME FILE\n",
+		        argv[0]);
 		return 1;
 	}
-	const char *dict_name = argv[1];
-	const char *file_path = argv[2];
+	const char *dict_name = argv[argi];
+	const char *file_path = argv[argi + 1];
 
 	/* Unicode-aware iswalpha() needs a UTF-8 locale. */
 	if (!setlocale(LC_CTYPE, "C.UTF-8") && !setlocale(LC_CTYPE, "en_US.UTF-8")
 	    && !setlocale(LC_CTYPE, ""))
-		fprintf(stderr, "hunspell-bench-check: warning: no UTF-8 locale available\n");
+		fprintf(stderr, "hunspell-bench: warning: no UTF-8 locale available\n");
 
 	char aff_path[4096], dic_path[4096];
-	snprintf(aff_path, sizeof aff_path, "/usr/share/hunspell/%s.aff", dict_name);
-	snprintf(dic_path, sizeof dic_path, "/usr/share/hunspell/%s.dic", dict_name);
+	snprintf(aff_path, sizeof aff_path, "data/%s.aff", dict_name);
+	snprintf(dic_path, sizeof dic_path, "data/%s.dic", dict_name);
 
 	double t0 = now();
 	Hunhandle *h = Hunspell_create(aff_path, dic_path);
 	double load_seconds = now() - t0;
 	if (!h) {
-		fprintf(stderr, "hunspell-bench-check: could not load dictionary %s\n", dict_name);
+		fprintf(stderr, "hunspell-bench: could not load dictionary %s\n", dict_name);
 		return 1;
 	}
 
@@ -130,7 +169,7 @@ main(int argc, char **argv)
 	if (strcmp(dic_encoding, "UTF-8") != 0) {
 		cd = iconv_open(dic_encoding, "UTF-8");
 		if (cd == (iconv_t)-1) {
-			fprintf(stderr, "hunspell-bench-check: iconv_open UTF-8 -> %s: %s\n",
+			fprintf(stderr, "hunspell-bench: iconv_open UTF-8 -> %s: %s\n",
 			        dic_encoding, strerror(errno));
 			return 1;
 		}
@@ -138,13 +177,22 @@ main(int argc, char **argv)
 
 	long file_size;
 	char *buf = read_file(file_path, &file_size);
+	if (lines >= 0) {
+		/* Keep only the first LINES lines. */
+		char *q = buf;
+		for (long n = 0; n < lines && (q = memchr(q, '\n', buf + file_size - q)); n++)
+			q++;
+		if (q && q < buf + file_size) {
+			file_size = q - buf;
+			buf[file_size] = '\0';
+		}
+	}
 
 	/* Timing starts here, once the file is already loaded: words are
 	 * found and checked on the fly, one at a time, rather than first
 	 * collected into a list. */
 	t0 = now();
-	long word_count = 0;
-	long correct_count = 0;
+	struct tally t = {.suggest = suggest};
 	mbstate_t mbs;
 	memset(&mbs, 0, sizeof mbs);
 	char *p = buf, *end = buf + file_size;
@@ -167,28 +215,49 @@ main(int argc, char **argv)
 				wlen += n;
 			}
 		} else if (wlen > 0) {
-			word_count++;
-			if (check_word(h, cd, word, wlen))
-				correct_count++;
+			count_word(h, cd, word, wlen, &t);
 			wlen = 0;
 		}
 		p += n;
 	}
-	if (wlen > 0) {
-		word_count++;
-		if (check_word(h, cd, word, wlen))
-			correct_count++;
-	}
+	if (wlen > 0)
+		count_word(h, cd, word, wlen, &t);
 	double check_seconds = now() - t0;
+
+	/* Suggestions are timed separately, after the check pass. */
+	long suggestion_count = 0;
+	double suggest_seconds = 0;
+	if (suggest) {
+		t0 = now();
+		for (long i = 0; i < t.misspelled_count; i++) {
+			char **slst = NULL;
+			int n = Hunspell_suggest(h, &slst, t.misspelled[i]);
+			suggestion_count += n;
+			if (n > 0)
+				Hunspell_free_list(h, &slst, n);
+		}
+		suggest_seconds = now() - t0;
+	}
 
 	printf("benchmark:  hunspell %s %s\n", dict_name, file_path);
 	printf("load dict:  %.3fs\n", load_seconds);
-	printf("check:      %ld words, %ld correct\n", word_count, correct_count);
+	printf("check:      %ld words, %ld correct\n", t.word_count, t.correct_count);
 	printf("            %.3fs total\n", check_seconds);
-	printf("            %.3fK words/s,\n", word_count / check_seconds / 1000.0);
+	printf("            %.2f µs/word\n",
+	       1e6 * check_seconds / (t.word_count > 0 ? t.word_count : 1));
+	if (suggest) {
+		printf("suggest:    %ld words, %ld suggestions\n", t.misspelled_count,
+		       suggestion_count);
+		printf("            %.3fs total\n", suggest_seconds);
+		printf("            %.2f ms/word\n",
+		       1e3 * suggest_seconds / (t.misspelled_count > 0 ? t.misspelled_count : 1));
+	}
 
 	if (cd != (iconv_t)-1)
 		iconv_close(cd);
+	for (long i = 0; i < t.misspelled_count; i++)
+		free(t.misspelled[i]);
+	free(t.misspelled);
 	Hunspell_destroy(h);
 	free(buf);
 	return 0;
