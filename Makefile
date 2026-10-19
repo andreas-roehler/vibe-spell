@@ -40,10 +40,27 @@ hunspell:
 nuspell:
 	git clone https://github.com/nuspell/nuspell.git $@
 
-gutenberg:
-	mkdir -p gutenberg
-	curl -L -o gutenberg/lusiadas.txt https://www.gutenberg.org/ebooks/3333.txt.utf-8
-	curl -L -o gutenberg/alice.txt https://www.gutenberg.org/ebooks/11.txt.utf-8
+DOCUMENTS = documents/alice.txt documents/domcasmurro.txt documents/mujeong.txt
+
+.PHONY: documents
+documents: $(DOCUMENTS)
+
+documents/alice.txt:
+	mkdir -p documents
+	curl -L -o $@ https://www.gutenberg.org/ebooks/11.txt.utf-8
+
+documents/domcasmurro.txt:
+	mkdir -p documents
+	curl -L -o $@ https://www.gutenberg.org/ebooks/55752.txt.utf-8
+
+# First part (chapters 1-20) of Yi Kwang-su's Mujeong, from Korean
+# Wikisource; the sed script drops the wiki templates (the page header
+# and the paragraph-break markers), leaving plain text.
+documents/mujeong.txt:
+	mkdir -p documents
+	curl -L -A vibe-spell-bench \
+		'https://ko.wikisource.org/w/index.php?title=%EB%AC%B4%EC%A0%95/1%EC%9E%A5~20%EC%9E%A5&action=raw' \
+		| sed -e '/^{{.*}}$$/d' -e '/^{{/,/^}}$$/d' > $@
 
 .PHONY: tests
 tests: hunspell nuspell
@@ -52,10 +69,11 @@ tests: hunspell nuspell
 BENCH_LINES ?= 1000
 
 .PHONY: bench-check
-bench-check: gutenberg all .tmp/hunspell-bench-check
+bench-check: $(DOCUMENTS) all .tmp/hunspell-bench-check
 	mkdir -p .tmp
-	head -n $(BENCH_LINES) gutenberg/alice.txt > .tmp/alice-sample.txt
-	head -n $(BENCH_LINES) gutenberg/lusiadas.txt > .tmp/lusiadas-sample.txt
+	head -n $(BENCH_LINES) documents/alice.txt > .tmp/alice-sample.txt
+	head -n $(BENCH_LINES) documents/domcasmurro.txt > .tmp/domcasmurro-sample.txt
+	head -n $(BENCH_LINES) documents/mujeong.txt > .tmp/mujeong-sample.txt
 	@echo ================================================================================
 	@.tmp/hunspell-bench-check en_US .tmp/alice-sample.txt
 	@echo --------------------------------------------------------------------------------
@@ -63,11 +81,17 @@ bench-check: gutenberg all .tmp/hunspell-bench-check
 	@echo --------------------------------------------------------------------------------
 	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-check en_US .tmp/alice-sample.txt
 	@echo ================================================================================
-	@.tmp/hunspell-bench-check pt_BR .tmp/lusiadas-sample.txt
+	@.tmp/hunspell-bench-check pt_BR .tmp/domcasmurro-sample.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-check pt_BR .tmp/lusiadas-sample.txt
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-check pt_BR .tmp/domcasmurro-sample.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-check pt_BR .tmp/lusiadas-sample.txt
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-check pt_BR .tmp/domcasmurro-sample.txt
+	@echo ================================================================================
+	@.tmp/hunspell-bench-check ko_KR .tmp/mujeong-sample.txt
+	@echo --------------------------------------------------------------------------------
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench-check ko_KR .tmp/mujeong-sample.txt
+	@echo --------------------------------------------------------------------------------
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench-check ko_KR .tmp/mujeong-sample.txt
 
 MISSPELLINGS = hunspell/tests/suggestiontest/List_of_common_misspellings.txt
 BENCH_SUGGEST_LINES ?= 100
