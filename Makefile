@@ -55,12 +55,12 @@ data: $(DATA)
 data/alice.txt:
 	mkdir -p data .tmp
 	curl -fL -o .tmp/$(@F) https://www.gutenberg.org/ebooks/11.txt.utf-8
-	tail -n +31 .tmp/$(@F) > $@
+	sed -e '1,/^\*\*\* START OF/d' -e '/^\*\*\* END OF/,$$d' .tmp/$(@F) > $@
 
 data/lusiadas.txt:
 	mkdir -p data .tmp
 	curl -fL -o .tmp/$(@F) https://www.gutenberg.org/ebooks/3333.txt.utf-8
-	tail -n +31 .tmp/$(@F) > $@
+	sed -e '1,/^\*\*\* START OF/d' -e '/^\*\*\* END OF/,$$d' .tmp/$(@F) > $@
 
 # First part (chapters 1-20) of Yi Kwang-su's Mujeong, from Korean
 # Wikisource; the sed script drops the wiki templates (the page header
@@ -75,12 +75,12 @@ data/mujeong.txt:
 data/egri.txt:
 	mkdir -p data .tmp
 	curl -fL -o .tmp/$(@F) https://www.gutenberg.org/ebooks/76235.txt.utf-8
-	tail -n +31 .tmp/$(@F) > $@
+	sed -e '1,/^\*\*\* START OF/d' -e '/^\*\*\* END OF/,$$d' .tmp/$(@F) > $@
 
 data/verwandlung.txt:
 	mkdir -p data .tmp
 	curl -fL -o .tmp/$(@F) https://www.gutenberg.org/ebooks/22367.txt.utf-8
-	tail -n +31 .tmp/$(@F) > $@
+	sed -e '1,/^\*\*\* START OF/d' -e '/^\*\*\* END OF/,$$d' .tmp/$(@F) > $@
 
 DEBIAN_POOL = http://deb.debian.org/debian/pool/main
 DEB_en_US = $(DEBIAN_POOL)/s/scowl/hunspell-en-us_2020.12.07-4_all.deb
@@ -103,43 +103,40 @@ data/%.aff:
 tests: hunspell nuspell
 	$(BATCH) -l ert -l vibe-spell-tests.el -f ert-run-tests-batch-and-exit
 
-BENCH_LINES ?= 1000
-# E.g. BENCH_FLAGS=--suggest to also time suggestions for the
-# misspelled words found.
 BENCH_FLAGS ?=
 
 .PHONY: bench
 bench: $(DATA) all .tmp/hunspell-bench
 	@echo ================================================================================
-	@.tmp/hunspell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) en_US data/alice.txt
+	@.tmp/hunspell-bench $(BENCH_FLAGS) en_US data/alice.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) en_US data/alice.txt
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) en_US data/alice.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) en_US data/alice.txt
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) en_US data/alice.txt
 # Suggestions for Korean take too long to be worth benchmarking.
 ifeq ($(filter --suggest,$(BENCH_FLAGS)),)
 	@echo ================================================================================
-	@.tmp/hunspell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) ko_KR data/mujeong.txt
+	@.tmp/hunspell-bench $(BENCH_FLAGS) ko_KR data/mujeong.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) ko_KR data/mujeong.txt
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) ko_KR data/mujeong.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) ko_KR data/mujeong.txt
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) ko_KR data/mujeong.txt
 endif
 	@echo ================================================================================
-	@.tmp/hunspell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) pt_BR data/lusiadas.txt
+	@.tmp/hunspell-bench $(BENCH_FLAGS) pt_BR data/lusiadas.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) pt_BR data/lusiadas.txt
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) pt_BR data/lusiadas.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) pt_BR data/lusiadas.txt
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) pt_BR data/lusiadas.txt
 	@echo ================================================================================
-	@.tmp/hunspell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) de_DE data/verwandlung.txt
+	@.tmp/hunspell-bench $(BENCH_FLAGS) de_DE data/verwandlung.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) de_DE data/verwandlung.txt
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) de_DE data/verwandlung.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) de_DE data/verwandlung.txt
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) de_DE data/verwandlung.txt
 	@echo ================================================================================
-	@.tmp/hunspell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) hu_HU data/egri.txt
+	@.tmp/hunspell-bench $(BENCH_FLAGS) hu_HU data/egri.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) hu_HU data/egri.txt
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) hu_HU data/egri.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench --lines $(BENCH_LINES) $(BENCH_FLAGS) hu_HU data/egri.txt
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) hu_HU data/egri.txt

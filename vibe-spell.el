@@ -159,8 +159,6 @@ Return non-nil if WORD was actually present and therefore removed."
 ;; Besides the limitations listed in the Commentary, the following
 ;; simplifications were made relative to upstream Nuspell:
 ;;
-;; - CHECKCOMPOUNDREP, which consults the REP table, is accepted but
-;;   has no effect.
 ;; - CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not
 ;;   enforced.
 ;; - PHONE is not parsed; Nuspell's own `Suggester' never calls it
@@ -194,6 +192,8 @@ Return non-nil if WORD was actually present and therefore removed."
 ;; - The 360-character length limit is counted in characters rather
 ;;   than UTF-8 bytes, and a word over the limit is accepted rather
 ;;   than rejected.
+;; - Unlike Nuspell, a suggestion that OCONV maps back to the
+;;   misspelled word itself is dropped, as Hunspell does (its gh#1002).
 ;;
 ;; For affix stripping, Nuspell tries combinations of up to one prefix
 ;; and up to two suffixes (or vice versa); this port implements that
@@ -310,6 +310,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
   (compound-check-duplicate nil)
   (compound-check-case nil)
   (compound-check-triple nil)
+  (compound-check-rep nil)
   ;; suggestion options
   (try-chars "")
   (keyboard-closeness "")
@@ -913,6 +914,33 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
         (or (and (< (1+ i) (length word)) (eq c (aref word (1+ i))))
             (and (> (1- i) 0) (eq (aref word (- i 2)) b)))))))
 
+(defun -rep-similar-p (dict word)
+;; Return non-nil if some REP replacement turns WORD into a correct
+;; simple word, i.e. WORD is likely a misspelling of that word rather
+;; than a compound.  Mirrors Nuspell's `Checker::is_rep_similar'.
+  (or (-dolist-until (r (-dict-rep-whole dict))
+        (and (string= word (car r))
+             (-check-simple-word dict (cdr r) t)))
+      (-dolist-until (r (-dict-rep-start dict))
+        (and (string-prefix-p (car r) word)
+             (-check-simple-word
+              dict (concat (cdr r) (substring word (length (car r)))) t)))
+      (-dolist-until (r (-dict-rep-end dict))
+        (and (string-suffix-p (car r) word)
+             (-check-simple-word
+              dict (concat (substring word 0 (- (length word) (length (car r)))) (cdr r)) t)))
+      (-dolist-until (r (-dict-rep-any dict))
+        (let* ((from (car r))
+               (i (and (not (string-empty-p from)) (string-search from word)))
+               (found nil))
+          (while (and i (not found))
+            (setq found (-check-simple-word
+                         dict (concat (substring word 0 i) (cdr r)
+                                      (substring word (+ i (length from))))
+                         t))
+            (setq i (string-search from word (1+ i))))
+          found))))
+
 (defun -check-compound-classic (dict mode word start-pos i num-part allow-bad-forceucase)
 ;; Try to split WORD[START-POS:] as a compound with its first part
 ;; ending at I.  Returns the dictionary entry (ROOT-WORD . FLAGS) for
@@ -933,6 +961,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                       (not (-flags-contain (cdr part2-entry) (-dict-forbiddenword-flag dict)))
                       (not (and (-dict-compound-check-duplicate dict)
                                 (eq (cdr part1-entry) (cdr part2-entry))))
+                      (not (and (-dict-compound-check-rep dict)
+                                (-rep-similar-p dict (substring word start-pos))))
                       (not (and (/= 0 (-dict-compound-force-uppercase dict))
                                 (not allow-bad-forceucase)
                                 (-flags-contain (cdr part2-entry) (-dict-compound-force-uppercase dict)))))))
@@ -941,8 +971,18 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                  (and (not (and (/= 0 (-dict-compound-max-word-count dict))
                                 (>= (1+ num-part2) (-dict-compound-max-word-count dict))))
                       part1-entry))
-             (and (-check-compound-split dict :compound-middle word i (1+ num-part1) allow-bad-forceucase)
-                  part1-entry))))))
+             (let ((part2-entry (-check-compound-split dict :compound-middle word i
+                                                       (1+ num-part1) allow-bad-forceucase)))
+               (and part2-entry
+                    ;; Also try the first two parts alone, when the
+                    ;; second is an unaffixed dictionary word.
+                    (not (and (-dict-compound-check-rep dict)
+                              (or (-rep-similar-p dict (substring word start-pos))
+                                  (let ((end (+ i (length (car part2-entry)))))
+                                    (and (<= end (length word))
+                                         (string= (car part2-entry) (substring word i end))
+                                         (-rep-similar-p dict (substring word start-pos end)))))))
+                    part1-entry)))))))
 
 (defun -check-compound-split (dict mode word start-pos num-part allow-bad-forceucase)
 ;; Try every split point of WORD[START-POS:] respecting COMPOUNDMIN.
@@ -2023,7 +2063,10 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 
     (-sugs-box-set box (-dedup-preserve-first (-sugs-list box)))
 
-    (mapcar (lambda (s) (-substr-replace (-dict-output-oconv dict) s)) (-sugs-list box))))
+    ;; OCONV can map a suggestion back to WORD itself (e.g. "románórum"
+    ;; to "romanórum"); drop it then, as Hunspell does (its gh#1002).
+    (delete word (mapcar (lambda (s) (-substr-replace (-dict-output-oconv dict) s))
+                         (-sugs-list box)))))
 
 (defun -suggest-priv (dict word)
 ;; Return VIBE-SPELL-SUGGEST's suggestions for WORD, as a plain list.
@@ -2515,6 +2558,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                 (setf (-dict-compound-check-duplicate dict) t))
                ((string= command "CHECKCOMPOUNDTRIPLE")
                 (setf (-dict-compound-check-triple dict) t))
+               ((string= command "CHECKCOMPOUNDREP")
+                (setf (-dict-compound-check-rep dict) t))
                ((string= command "AF")
                 (pcase (-array-command-step cmd-counts command (car args))
                   ('data

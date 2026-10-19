@@ -72,8 +72,7 @@
 ;; tight loop that does not yield back to Emacs's timer machinery --
 ;; so an in-process `with-timeout' cannot reliably interrupt it, but
 ;; an external, OS-level `timeout' always can.  A subprocess that is
-;; killed this way is reported as a skip rather than a pass or a
-;; failure.
+;; killed this way is reported as a failure.
 ;;
 ;; Run with, e.g.:
 ;;   emacs -batch -L . -l ert -l vibe-spell-tests.el \
@@ -97,7 +96,7 @@
 (unless (file-directory-p vibe-spell-tests-hunspell-dir)
   (error "vibe-spell-tests: no such directory %s" vibe-spell-tests-hunspell-dir))
 
-(defconst vibe-spell-tests-timeout 10
+(defconst vibe-spell-tests-timeout 1
   "Seconds allowed for a subprocess-isolated test to finish.
 See `vibe-spell-tests-subprocess-dictionaries' and the Commentary at
 the top of this file.")
@@ -137,9 +136,6 @@ point fails here too.")
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
     (vibe-spell-test-hunspell-checkcompoundpattern7 .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    (vibe-spell-test-hunspell-checkcompoundrep .
-     "CHECKCOMPOUNDREP is accepted but has no effect, per the LLM notes to
-self in vibe-spell.el.")
     (vibe-spell-test-hunspell-complexprefixes .
      "COMPLEXPREFIXES is not supported; `vibe-spell-create' refuses the
 dictionary, per the Commentary in vibe-spell.el.")
@@ -205,6 +201,10 @@ accepted; this multi-word .dic entry mechanism is not implemented
     (vibe-spell-test-hunspell-simplifiedtriple .
      "SIMPLIFIEDTRIPLE's extra \"insert the elided letter back and retry\"
 fallback is not implemented, per the LLM notes to self in vibe-spell.el.")
+    (vibe-spell-test-hunspell-timelimit .
+     "Hunspell gives up on a compound search after 50 ms (its
+TIMELIMIT_MS); Nuspell, which this ports, has no such limit, so this
+adversarial input runs past `vibe-spell-tests-timeout'.")
     (vibe-spell-test-hunspell-trace_compound .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
     (vibe-spell-test-hunspell-wordpair .
@@ -221,11 +221,7 @@ than Hunspell's own; Nuspell's test suite marks this one as failing
 too.")
     (vibe-spell-test-hunspell-suggest-checksharpsutf .
      "CHECKSHARPS (German sharp s) suggestion casing variants are narrower
-than Hunspell's own.")
-    (vibe-spell-test-hunspell-suggest-gh1002 .
-     "OCONV is applied to finished suggestions, as in Nuspell, so one can
-end up equal to the misspelled word itself (\"románórum\" becomes
-\"romanórum\"); Hunspell drops such a suggestion, Nuspell does not.")
+than Hunspell's own."); Hunspell drops such a suggestion, Nuspell does not.")
     (vibe-spell-test-hunspell-suggest-nosuggest .
      "NOSUGGEST only filters n-gram suggestions, as in Nuspell, whose
 `add_sug_if_correct' ignores it; Nuspell's test suite marks this one
@@ -240,7 +236,11 @@ fields, and PHONE is not implemented either.")
     (vibe-spell-test-hunspell-suggest-ph2 .
      "Hunspell turns ph: fields of .dic entries (known misspellings of a
 word) into suggestions; like Nuspell, this port ignores morphological
-fields."))
+fields.")
+    (vibe-spell-test-hunspell-suggest-timelimit .
+     "Hunspell gives up on a compound search after 50 ms (its
+TIMELIMIT_MS); Nuspell, which this ports, has no such limit, so this
+adversarial input runs past `vibe-spell-tests-timeout'."))
   "Alist of ERT test name (a symbol) to why it is a known failure.
 Tests named here are declared with `:expected-result :failed'; see
 `vibe-spell-tests--maybe-xfail'.  A test listed here that starts
@@ -312,7 +312,7 @@ know or care about that time limit."
 (defun vibe-spell-tests--run-case-subprocess (checker name)
   "Run `vibe-spell-tests--subprocess-check' for CHECKER and NAME.
 It runs in its own subprocess, which is killed, and this is reported
-as a skip, if it does not finish within `vibe-spell-tests-timeout'."
+as a failure, if it does not finish within `vibe-spell-tests-timeout'."
   (let* ((timeout-bin (or (executable-find "timeout")
                            (error "vibe-spell-tests: `timeout' utility not found")))
          (emacs-bin (or (executable-find "emacs")
@@ -331,7 +331,7 @@ as a skip, if it does not finish within `vibe-spell-tests-timeout'."
           (let ((output (with-current-buffer buf (buffer-string))))
             (cond
              ((= status 124)
-              (ert-skip (format "did not finish within %ds"
+              (ert-fail (format "did not finish within %ds"
                                  vibe-spell-tests-timeout)))
              ((string-prefix-p "FAIL:" output) (ert-fail (substring output 5)))
              ((string-prefix-p "OK" output) t)
