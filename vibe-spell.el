@@ -97,6 +97,24 @@ Donaudampfschiffahrtselektrizitätenhauptbetriebswerkbauunterbeamtengesellschaft
   "Maximum word length to be processed by the spell checker.
 Longer words are always reported as correct.")
 
+(defvar vibe-spell-check-time-limit 5
+  "Time limit, in milliseconds, for checking a single word.
+A word whose check takes longer is reported as correct, with
+`vibe-spell-check' returning `timeout'.  If nil, there is no limit.")
+
+(defvar vibe-spell-suggest-time-limit 500
+  "Time limit, in milliseconds, for suggesting corrections for a word.
+When it is exceeded, the suggestions found so far are returned.  If
+nil, there is no limit.")
+
+;; Time limit of the current operation, or nil.  This is a cons
+;; (DEADLINE . GC-ELAPSED): the value that `car' of `current-time' may
+;; reach before giving up, and the value of `gc-elapsed' when DEADLINE
+;; was last set; time spent in GC does not count toward the limit.
+;; This is let-bound by the public API functions, together with
+;; `current-time-list' set to nil.
+(defvar -time-limit nil)
+
 ;;; Public API
 
 (defun vibe-spell-create (name)
@@ -121,14 +139,25 @@ NAME.dic."
       dict)))
 
 (defun vibe-spell-check (dict word)
-  "Return non-nil if WORD is spelled correctly according to DICT."
-  (or (length> word -max-word-length) (-spell dict word)))
+  "Return non-nil if WORD is spelled correctly according to DICT.
+If the check exceeds `vibe-spell-check-time-limit', return `timeout'."
+  (or (length> word -max-word-length)
+      (let* ((current-time-list nil)
+             (-time-limit (-time-limit-from-now vibe-spell-check-time-limit)))
+        (catch '-time-limit
+          (-spell dict word)))))
 
 (defun vibe-spell-suggest (dict word)
-  "Return a list of corrections for WORD based on DICT."
+  "Return a list of corrections for WORD based on DICT.
+See also `vibe-spell-suggest-time-limit'."
   (unless (length> word -max-word-length)
-    (let ((gc-cons-percentage (max gc-cons-percentage 1.0)))
-      (-suggest-priv dict word))))
+    (let* ((gc-cons-percentage (max gc-cons-percentage 1.0))
+           (current-time-list nil)
+           (-time-limit (-time-limit-from-now vibe-spell-suggest-time-limit))
+           ;; `-suggest-for-casing' catches its own timeouts; this only
+           ;; catches the early compound check in `-suggest-priv'.
+           (sugs (catch '-time-limit (-suggest-priv dict word))))
+      (unless (eq sugs 'timeout) sugs))))
 
 (defun vibe-spell-add-word (dict word &optional save)
   "Add WORD to DICT, and optionally SAVE it to personal dictionary file."
@@ -194,6 +223,11 @@ Return non-nil if WORD was actually present and therefore removed."
 ;;   than rejected.
 ;; - Unlike Nuspell, a suggestion that OCONV maps back to the
 ;;   misspelled word itself is dropped, as Hunspell does (its gh#1002).
+;; - Unlike Nuspell, checking and suggesting have time limits
+;;   (`vibe-spell-check-time-limit', `vibe-spell-suggest-time-limit'),
+;;   in the spirit of Hunspell's TIMELIMIT_* ones; but a check that
+;;   runs out accepts the word, where Hunspell rejects it.  GC time
+;;   does not count toward the limits.
 ;;
 ;; For affix stripping, Nuspell tries combinations of up to one prefix
 ;; and up to two suffixes (or vice versa); this port implements that
@@ -220,6 +254,27 @@ Return non-nil if WORD was actually present and therefore removed."
 ;;; Implementation
 
 ;;;; Helpers
+
+(defun -time-limit-from-now (ms)
+;; Return the `-time-limit' value for MS milliseconds from now, or nil
+;; if MS is nil.  Assumes `current-time-list' is nil.
+  (when ms
+    (let ((now (current-time)))
+      (cons (+ (car now) (/ (* ms (cdr now)) 1000)) gc-elapsed))))
+
+(defsubst -check-time-limit ()
+;; Throw to the `-time-limit' tag, with value `timeout', if
+;; `-time-limit' has passed even after postponing it by the GC time
+;; since it was set.  A check catching the throw reports the word as
+;; correct; a suggestion returns what it found so far.
+  (when -time-limit
+    (let ((now (current-time)))
+      (when (> (car now) (car -time-limit))
+        (setcar -time-limit (+ (car -time-limit)
+                               (round (* (- gc-elapsed (cdr -time-limit)) (cdr now)))))
+        (setcdr -time-limit gc-elapsed)
+        (when (> (car now) (car -time-limit))
+          (throw '-time-limit 'timeout))))))
 
 (defmacro -dolist-until (spec &rest body)
   "Like `dolist', but stop when BODY first evaluates to a non-nil value.
@@ -946,6 +1001,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; ending at I.  Returns the dictionary entry (ROOT-WORD . FLAGS) for
 ;; the first part on success, or nil.  MODE is :compound-begin or
 ;; :compound-middle, matching the position of the first part.
+  (-check-time-limit)
   (let* ((part1-text (substring word start-pos i))
          (part1-entry (-check-word-in-compound dict mode part1-text)))
     (and part1-entry
@@ -1040,6 +1096,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
          (len (length word)))
     (and (>= (- len start-pos) (* 2 min-len))
          (-dolist-until (i (number-sequence (+ start-pos min-len) (- len min-len)))
+           (-check-time-limit)
            (let* ((part1-text (substring word start-pos i))
                   (part1-entry (-find-compound-rule-word dict part1-text)))
              (and part1-entry
@@ -1302,6 +1359,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; Push WORD onto BOX if it is a correct, suggestible word of DICT.
 ;; Return non-nil iff it was pushed.  Mirrors Nuspell's
 ;; `Suggester::add_sug_if_correct'.
+  (-check-time-limit)
   (let ((res (-check-word dict word nil t)))
     (and res
          (not (-flags-contain (cdr res) (-dict-forbiddenword-flag dict)))
@@ -1855,6 +1913,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
         (top-roots (make-vector 100 (list most-negative-fixnum 0)))
         roots)
     (dotimes (i (length candidates))
+      (when (zerop (logand i 1023))
+        (-check-time-limit))
       (let* ((c (aref candidates i))
              (score (+ (-left-common-substring-length wrong-word (car c))
                        (-ngram-similarity-longer-worse 3 wrong-word (cadr c) wrong-grams))))
@@ -1884,6 +1944,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
             (guess-idx 0)
             guesses)
         (dolist (r roots)
+          (-check-time-limit)
           (pcase-let ((`(,_ ,word ,word-lower ,flags) r))
             (dolist (expanded (-expand-root-word-for-ngram dict word flags wrong-word))
               (let* ((lower (if (eq expanded word) word-lower (downcase expanded)))
@@ -2004,55 +2065,65 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
           (setq i (if dash (1+ j) (1+ len))))))))
 
 (defun -suggest-for-casing (dict word casing)
-;; Return suggestions for WORD, dispatching on its CASING.  Called
-;; from `-suggest-priv' once WORD has had any trailing abbreviation
-;; dots trimmed and its early-exit special case ruled out; CASING is
-;; `-classify-casing' of WORD.
-  (let ((box (-sugs-box-create)) (hq-sugs nil))
-    (pcase casing
-      ('small
-       (setq hq-sugs (-suggest-low dict word box)))
-      ('init-capital
-       (setq hq-sugs (-suggest-low dict word box))
-       (setq hq-sugs (or (-suggest-low dict (downcase word) box) hq-sugs)))
-      ((or 'camel 'pascal)
-       (setq hq-sugs (-suggest-low dict word box))
-       (let ((dot (string-search "." word)))
-         (when dot
-           (let ((after (substring word (1+ dot))))
-             (when (eq (-classify-casing after) 'init-capital)
-               (-sugs-push-first box (concat (substring word 0 (1+ dot)) " " after))))))
-       (when (eq casing 'pascal)
-         (let ((buffer (concat (downcase (substring word 0 1)) (substring word 1))))
-           (when (-spell dict buffer) (-sugs-push-first box buffer))
-           (setq hq-sugs (or (-suggest-low dict buffer box) hq-sugs))))
-       (let ((lower (downcase word)))
-         (when (-spell dict lower) (-sugs-push-first box lower))
-         (setq hq-sugs (or (-suggest-low dict lower box) hq-sugs)))
-       (when (eq casing 'pascal)
-         (let ((title (-to-title word)))
-           (when (-spell dict title) (-sugs-push-first box title))
-           (setq hq-sugs (or (-suggest-low dict title box) hq-sugs))))
-       (-fix-space-casing-in-sugs box word))
-      ('all-capital
-       (let ((lower (downcase word)))
-         (when (and (/= 0 (-dict-keepcase-flag dict)) (-spell dict lower))
-           (-sugs-push-first box lower))
-         (setq hq-sugs (-suggest-low dict lower box)))
-       (let ((title (-to-title word)))
-         (setq hq-sugs (or (-suggest-low dict title box) hq-sugs)))
-       (-sugs-box-set box (mapcar #'upcase (-sugs-list box)))))
+  ;; Return suggestions for WORD, dispatching on its CASING.  Called
+  ;; from `-suggest-priv' once WORD has had any trailing abbreviation
+  ;; dots trimmed and its early-exit special case ruled out; CASING is
+  ;; `-classify-casing' of WORD.
+  (let* ((box (-sugs-box-create)) (hq-sugs nil)
+         (timed-out
+          (catch '-time-limit
+            (pcase casing
+              ('small
+               (setq hq-sugs (-suggest-low dict word box)))
+              ('init-capital
+               (setq hq-sugs (-suggest-low dict word box))
+               (setq hq-sugs (or (-suggest-low dict (downcase word) box) hq-sugs)))
+              ((or 'camel 'pascal)
+               (setq hq-sugs (-suggest-low dict word box))
+               (let ((dot (string-search "." word)))
+                 (when dot
+                   (let ((after (substring word (1+ dot))))
+                     (when (eq (-classify-casing after) 'init-capital)
+                       (-sugs-push-first box (concat (substring word 0 (1+ dot)) " " after))))))
+               (when (eq casing 'pascal)
+                 (let ((buffer (concat (downcase (substring word 0 1)) (substring word 1))))
+                   (when (-spell dict buffer) (-sugs-push-first box buffer))
+                   (setq hq-sugs (or (-suggest-low dict buffer box) hq-sugs))))
+               (let ((lower (downcase word)))
+                 (when (-spell dict lower) (-sugs-push-first box lower))
+                 (setq hq-sugs (or (-suggest-low dict lower box) hq-sugs)))
+               (when (eq casing 'pascal)
+                 (let ((title (-to-title word)))
+                   (when (-spell dict title) (-sugs-push-first box title))
+                   (setq hq-sugs (or (-suggest-low dict title box) hq-sugs))))
+               (-fix-space-casing-in-sugs box word))
+              ('all-capital
+               (let ((lower (downcase word)))
+                 (when (and (/= 0 (-dict-keepcase-flag dict)) (-spell dict lower))
+                   (-sugs-push-first box lower))
+                 (setq hq-sugs (-suggest-low dict lower box)))
+               (let ((title (-to-title word)))
+                 (setq hq-sugs (or (-suggest-low dict title box) hq-sugs)))
+               (-sugs-box-set box (mapcar #'upcase (-sugs-list box)))))
 
-    (when (and (not hq-sugs) (/= 0 (-dict-max-ngram-suggestions dict)))
-      (let* ((buffer (if (eq casing 'small) word (downcase word)))
-             (old-list (-sugs-list box))
-             (old-len (length old-list)))
-        (-ngram-suggest dict buffer box)
-        (when (eq casing 'all-capital)
-          (-sugs-box-set
-           box (append old-list (mapcar #'upcase (nthcdr old-len (-sugs-list box))))))))
+            (when (and (not hq-sugs) (/= 0 (-dict-max-ngram-suggestions dict)))
+              (let* ((buffer (if (eq casing 'small) word (downcase word)))
+                     (old-list (-sugs-list box))
+                     (old-len (length old-list)))
+                (-ngram-suggest dict buffer box)
+                (when (eq casing 'all-capital)
+                  (-sugs-box-set
+                   box (append old-list (mapcar #'upcase (nthcdr old-len (-sugs-list box))))))))
+            nil)))
 
-    (-suggest-dash-split dict box word)
+    (if (not timed-out)
+        (-suggest-dash-split dict box word)
+      ;; Out of time: keep what was found, finishing the casing fix-up
+      ;; the throw may have skipped, and lift the limit for the
+      ;; clean-ups below.
+      (when (eq casing 'all-capital)
+        (-sugs-box-set box (mapcar #'upcase (-sugs-list box))))
+      (setq -time-limit nil))
 
     (when (memq casing '(init-capital pascal))
       (-sugs-box-set box (mapcar (lambda (s) (-to-title-char-at s 0)) (-sugs-list box))))

@@ -60,20 +60,6 @@
 ;; (an "unexpected pass"), which is the prompt to remove it from that
 ;; list.
 ;;
-;; Almost every test runs directly in the ERT runner's own process.
-;; The dictionaries named in `vibe-spell-tests-subprocess-dictionaries'
-;; are the exception: each of those runs in its own `emacs -Q --batch'
-;; subprocess, wrapped by the external `timeout' command.  This is
-;; because Hunspell's own compound checker bails out of pathological
-;; inputs (e.g. tests/timelimit.*) via an explicit wall-clock budget;
-;; Nuspell's checker, which this port follows, has no such safeguard,
-;; so that handful of adversarial Hunspell regression inputs run its
-;; unmemoized compound-splitting search for a very long time, in a
-;; tight loop that does not yield back to Emacs's timer machinery --
-;; so an in-process `with-timeout' cannot reliably interrupt it, but
-;; an external, OS-level `timeout' always can.  A subprocess that is
-;; killed this way is reported as a failure.
-;;
 ;; Run with, e.g.:
 ;;   emacs -batch -L . -l ert -l vibe-spell-tests.el \
 ;;         -f ert-run-tests-batch-and-exit
@@ -95,16 +81,6 @@
 
 (unless (file-directory-p vibe-spell-tests-hunspell-dir)
   (error "vibe-spell-tests: no such directory %s" vibe-spell-tests-hunspell-dir))
-
-(defconst vibe-spell-tests-timeout 1
-  "Seconds allowed for a subprocess-isolated test to finish.
-See `vibe-spell-tests-subprocess-dictionaries' and the Commentary at
-the top of this file.")
-
-(defconst vibe-spell-tests-subprocess-dictionaries '("timelimit")
-  "Hunspell test dictionaries that must run in a time-limited subprocess.
-See the Commentary at the top of this file for why.  Every other
-dictionary's test runs directly in the ERT runner's own process.")
 
 (defconst vibe-spell-tests-known-failures
   '((vibe-spell-test-hunspell-2970240 .
@@ -203,8 +179,8 @@ accepted; this multi-word .dic entry mechanism is not implemented
 fallback is not implemented, per the LLM notes to self in vibe-spell.el.")
     (vibe-spell-test-hunspell-timelimit .
      "Hunspell gives up on a compound search after 50 ms (its
-TIMELIMIT_MS); Nuspell, which this ports, has no such limit, so this
-adversarial input runs past `vibe-spell-tests-timeout'.")
+TIMELIMIT_MS) and rejects the word; when `vibe-spell-check-time-limit'
+runs out, this port accepts it instead.")
     (vibe-spell-test-hunspell-trace_compound .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
     (vibe-spell-test-hunspell-wordpair .
@@ -236,11 +212,7 @@ fields, and PHONE is not implemented either.")
     (vibe-spell-test-hunspell-suggest-ph2 .
      "Hunspell turns ph: fields of .dic entries (known misspellings of a
 word) into suggestions; like Nuspell, this port ignores morphological
-fields.")
-    (vibe-spell-test-hunspell-suggest-timelimit .
-     "Hunspell gives up on a compound search after 50 ms (its
-TIMELIMIT_MS); Nuspell, which this ports, has no such limit, so this
-adversarial input runs past `vibe-spell-tests-timeout'."))
+fields."))
   "Alist of ERT test name (a symbol) to why it is a known failure.
 Tests named here are declared with `:expected-result :failed'; see
 `vibe-spell-tests--maybe-xfail'.  A test listed here that starts
@@ -293,51 +265,12 @@ word was misclassified."
           nil)))))
 
 (defun vibe-spell-tests--run-case (checker name)
-  "Run CHECKER for hunspell test NAME directly in this process.
+  "Run CHECKER for hunspell test NAME.
 CHECKER is `vibe-spell-tests--check' or
 `vibe-spell-tests--check-suggest'."
   (pcase (funcall checker name)
     ('nil t)
     (`(fail . ,msg) (ert-fail msg))))
-
-(defun vibe-spell-tests--subprocess-check (checker name)
-  "Print \"OK\" or \"FAIL:MESSAGE\" for CHECKER on hunspell test NAME.
-This is the entry point run, by `vibe-spell-tests--run-case-subprocess',
-in a subprocess that is externally time-limited; it does not itself
-know or care about that time limit."
-  (pcase (funcall checker name)
-    ('nil (princ "OK"))
-    (`(fail . ,msg) (princ (format "FAIL:%s" msg)))))
-
-(defun vibe-spell-tests--run-case-subprocess (checker name)
-  "Run `vibe-spell-tests--subprocess-check' for CHECKER and NAME.
-It runs in its own subprocess, which is killed, and this is reported
-as a failure, if it does not finish within `vibe-spell-tests-timeout'."
-  (let* ((timeout-bin (or (executable-find "timeout")
-                           (error "vibe-spell-tests: `timeout' utility not found")))
-         (emacs-bin (or (executable-find "emacs")
-                        (error "vibe-spell-tests: `emacs' executable not found")))
-         (args (list "-k" "2" (number-to-string vibe-spell-tests-timeout)
-                     emacs-bin "-Q" "--batch"
-                     "-L" vibe-spell-tests-project-dir
-                     "-l" "vibe-spell-tests"
-                     "--eval" (format "(vibe-spell-tests--subprocess-check #'%s %S)"
-                                    checker name)))
-         (buf (generate-new-buffer " *vibe-spell-tests-subprocess*"))
-         (status nil))
-    (unwind-protect
-        (progn
-          (setq status (apply #'call-process timeout-bin nil buf nil args))
-          (let ((output (with-current-buffer buf (buffer-string))))
-            (cond
-             ((= status 124)
-              (ert-fail (format "did not finish within %ds"
-                                 vibe-spell-tests-timeout)))
-             ((string-prefix-p "FAIL:" output) (ert-fail (substring output 5)))
-             ((string-prefix-p "OK" output) t)
-             (t (ert-fail (format "subprocess exited %s with unexpected output:\n%s"
-                                   status output))))))
-      (kill-buffer buf))))
 
 (defun vibe-spell-tests--define-hunspell-tests ()
   "Define one `ert-deftest' per Hunspell test dictionary with word lists."
@@ -353,9 +286,7 @@ as a failure, if it does not finish within `vibe-spell-tests-timeout'."
            `(ert-deftest ,test-name ()
               ,(format "Check hunspell/tests/%s.{good,wrong} with vibe-spell." name)
               ,@(vibe-spell-tests--maybe-xfail test-name)
-              (if (member ,name vibe-spell-tests-subprocess-dictionaries)
-                  (vibe-spell-tests--run-case-subprocess #'vibe-spell-tests--check ,name)
-                (vibe-spell-tests--run-case #'vibe-spell-tests--check ,name)))
+              (vibe-spell-tests--run-case #'vibe-spell-tests--check ,name))
            t))))))
 
 (vibe-spell-tests--define-hunspell-tests)
@@ -436,10 +367,7 @@ itself failed or the suggestions did not match."
            `(ert-deftest ,test-name ()
               ,(format "Check hunspell/tests/%s.{wrong,sug} with vibe-spell-suggest." name)
               ,@(vibe-spell-tests--maybe-xfail test-name)
-              (if (member ,name vibe-spell-tests-subprocess-dictionaries)
-                  (vibe-spell-tests--run-case-subprocess
-                   #'vibe-spell-tests--check-suggest ,name)
-                (vibe-spell-tests--run-case #'vibe-spell-tests--check-suggest ,name)))
+              (vibe-spell-tests--run-case #'vibe-spell-tests--check-suggest ,name))
            t))))))
 
 (vibe-spell-tests--define-hunspell-suggest-tests)
