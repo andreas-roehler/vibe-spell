@@ -138,6 +138,19 @@ NAME.dic."
       (-init-personal-dictionary dict name)
       dict)))
 
+(defun vibe-spell-list-dictionaries ()
+  "Return a list of available dictionaries.
+These are the names you can pass to `vibe-spell-create'."
+  (let (names)
+    (dolist (dir vibe-spell-dictionary-path)
+      (when (file-directory-p dir)
+        (dolist (aff (directory-files dir t "\\.aff\\'" t))
+          (let ((base (file-name-sans-extension aff)))
+            (when (and (file-readable-p aff)
+                       (file-readable-p (concat base ".dic")))
+              (push (file-name-nondirectory base) names))))))
+    (sort (delete-dups names) :in-place t)))
+
 (defun vibe-spell-check (dict word)
   "Return non-nil if WORD is spelled correctly according to DICT.
 If the check exceeds `vibe-spell-check-time-limit', return `timeout'."
