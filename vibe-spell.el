@@ -289,42 +289,20 @@ Return non-nil if WORD was actually present and therefore removed."
         (when (> (car now) (car -time-limit))
           (throw '-time-limit 'timeout))))))
 
-(defmacro -dolist-until (spec &rest body)
-  "Like `dolist', but stop when BODY first evaluates to a non-nil value.
-When that happens, evaluate RESULT and return it.  If RESULT is omitted,
-return the last body value.
-
-\(fn (VAR LIST [RESULT]) BODY...)"
-  (declare (indent 1) (debug ((symbolp form &optional form) body)))
-  (unless (consp spec)
-    (signal 'wrong-type-argument (list 'consp spec)))
-  (unless (<= 2 (length spec) 3)
-    (signal 'wrong-number-of-arguments (list '(2 . 3) (length spec))))
-  (let ((var (car spec))
-        (tail (make-symbol "tail"))
-        (result (make-symbol "result")))
-    `(let ((,tail ,(nth 1 spec)) ,var ,result)
-       (while ,tail
-         (setq ,var (car ,tail))
-         (setq ,result ,(macroexp-progn body))
-         (setq ,tail (if ,result
-                         ,(when (length= spec 3)
-                            `(prog1 nil
-                               (setq ,result ,(macroexp-progn (cddr spec)))))
-                       (cdr ,tail))))
-       ,result)))
-
 (defun -find-dictionary-base (name)
 ;; Return the path, sans extension, of dictionary NAME.  Searches
 ;; `vibe-spell-dictionary-path' for the first directory containing
 ;; both a readable NAME.aff and a readable NAME.dic, and returns that
 ;; directory's `expand-file-name' of NAME.  Signals an error if no
 ;; directory in the list has both files.
-  (or (-dolist-until (dir vibe-spell-dictionary-path)
-        (let ((base (expand-file-name name dir)))
-          (and (file-readable-p (concat base ".aff"))
-               (file-readable-p (concat base ".dic"))
-               base)))
+  (or (named-let recur ((tail vibe-spell-dictionary-path))
+        (when tail
+          (or (let ((dir (car tail)))
+                (let ((base (expand-file-name name dir)))
+                  (and (file-readable-p (concat base ".aff"))
+                       (file-readable-p (concat base ".dic"))
+                       base)))
+              (recur (cdr tail)))))
       (user-error "\
 vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                   name name)))
@@ -655,7 +633,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
   (mapcar #'cdr (append table nil)))
 
 (defmacro -do-prefixes-of (spec &rest body)
-;; Like `-dolist-until', over the `-prefix' entries of DICT whose text
+;; Iterate over the `-prefix' entries of DICT whose text
 ;; could precede WORD; see `-affix-table-find'.  SPEC has the form (VAR
 ;; DICT WORD): BODY is evaluated with VAR bound to each entry in turn,
 ;; until it returns non-nil, which is then the value of the whole form;
@@ -666,7 +644,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
        ,@body)))
 
 (defmacro -do-suffixes-of (spec &rest body)
-;; Like `-dolist-until', over the `-suffix' entries of DICT whose text
+;; Like `-do-prefixes-of', over the `-suffix' entries of DICT whose text
 ;; could follow WORD; see `-affix-table-find'.  SPEC has the form (VAR
 ;; DICT WORD), as for `-do-prefixes-of'.
   (declare (indent 1) (debug ((symbolp form form) body)))
@@ -768,14 +746,17 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                   (-circumfix-flags-p dict (-suffix-cont-flags se))))
          (-suffix-condition-matches-p se word)
          (let ((root (-suffix-to-root se word)))
-           (-dolist-until (flags (-homonyms dict root))
-             (and (-cross-valid-p flags (-suffix-flag se))
-                  (not (and (eq mode :full-word)
-                            (-flags-contain flags (-dict-compound-onlyin-flag dict))))
-                  (not (and skip-hidden (-hidden-homonym-p flags)))
-                  (or (-valid-inside-compound-p dict mode flags)
-                      (-valid-inside-compound-p dict mode (-suffix-cont-flags se)))
-                  (cons root flags)))))))
+           (named-let recur ((tail (-homonyms dict root)))
+             (when tail
+               (or (let ((flags (car tail)))
+                     (and (-cross-valid-p flags (-suffix-flag se))
+                          (not (and (eq mode :full-word)
+                                    (-flags-contain flags (-dict-compound-onlyin-flag dict))))
+                          (not (and skip-hidden (-hidden-homonym-p flags)))
+                          (or (-valid-inside-compound-p dict mode flags)
+                              (-valid-inside-compound-p dict mode (-suffix-cont-flags se)))
+                          (cons root flags)))
+                   (recur (cdr tail)))))))))
 
 (defun -strip-prefix-only (dict mode word skip-hidden)
   (-do-prefixes-of (pe dict word)
@@ -783,14 +764,17 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                   (-circumfix-flags-p dict (-prefix-cont-flags pe))))
          (-prefix-condition-matches-p pe word)
          (let ((root (-prefix-to-root pe word)))
-           (-dolist-until (flags (-homonyms dict root))
-             (and (-cross-valid-p flags (-prefix-flag pe))
-                  (not (and (eq mode :full-word)
-                            (-flags-contain flags (-dict-compound-onlyin-flag dict))))
-                  (not (and skip-hidden (-hidden-homonym-p flags)))
-                  (or (-valid-inside-compound-p dict mode flags)
-                      (-valid-inside-compound-p dict mode (-prefix-cont-flags pe)))
-                  (cons root flags)))))))
+           (named-let recur ((tail (-homonyms dict root)))
+             (when tail
+               (or (let ((flags (car tail)))
+                     (and (-cross-valid-p flags (-prefix-flag pe))
+                          (not (and (eq mode :full-word)
+                                    (-flags-contain flags (-dict-compound-onlyin-flag dict))))
+                          (not (and skip-hidden (-hidden-homonym-p flags)))
+                          (or (-valid-inside-compound-p dict mode flags)
+                              (-valid-inside-compound-p dict mode (-prefix-cont-flags pe)))
+                          (cons root flags)))
+                   (recur (cdr tail)))))))))
 
 (defun -strip-prefix-then-suffix-commutative (dict mode word skip-hidden)
 ;; Strip one prefix and one suffix, in either order.  A derived word
@@ -818,25 +802,28 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                   (eq circumfix-pe (-circumfix-flags-p dict se-cont))
                   (-suffix-condition-matches-p se word)
                   (let ((root (-suffix-to-root se word)))
-                    (-dolist-until (flags (-homonyms dict root))
-                      (let* ((valid-pe-outer
-                              (and (not has-needaffix-pe)
-                                   (-cross-valid-p flags (-suffix-flag se))
-                                   (or (-cross-valid-p se-cont (-prefix-flag pe))
-                                       (-cross-valid-p flags (-prefix-flag pe)))))
-                             (valid-se-outer
-                              (and (not has-needaffix-se)
-                                   (-cross-valid-p flags (-prefix-flag pe))
-                                   (or (-cross-valid-p pe-cont (-suffix-flag se))
-                                       (-cross-valid-p flags (-suffix-flag se))))))
-                        (and (or valid-pe-outer valid-se-outer)
-                             (not (and (eq mode :full-word)
-                                       (-flags-contain flags (-dict-compound-onlyin-flag dict))))
-                             (not (and skip-hidden (-hidden-homonym-p flags)))
-                             (or (-valid-inside-compound-p dict mode flags)
-                                 (-valid-inside-compound-p dict mode se-cont)
-                                 (-valid-inside-compound-p dict mode pe-cont))
-                             (cons root flags)))))))))))
+                    (named-let recur ((tail (-homonyms dict root)))
+                      (when tail
+                        (or (let ((flags (car tail)))
+                              (let* ((valid-pe-outer
+                                      (and (not has-needaffix-pe)
+                                           (-cross-valid-p flags (-suffix-flag se))
+                                           (or (-cross-valid-p se-cont (-prefix-flag pe))
+                                               (-cross-valid-p flags (-prefix-flag pe)))))
+                                     (valid-se-outer
+                                      (and (not has-needaffix-se)
+                                           (-cross-valid-p flags (-prefix-flag pe))
+                                           (or (-cross-valid-p pe-cont (-suffix-flag se))
+                                               (-cross-valid-p flags (-suffix-flag se))))))
+                                (and (or valid-pe-outer valid-se-outer)
+                                     (not (and (eq mode :full-word)
+                                               (-flags-contain flags (-dict-compound-onlyin-flag dict))))
+                                     (not (and skip-hidden (-hidden-homonym-p flags)))
+                                     (or (-valid-inside-compound-p dict mode flags)
+                                         (-valid-inside-compound-p dict mode se-cont)
+                                         (-valid-inside-compound-p dict mode pe-cont))
+                                     (cons root flags))))
+                            (recur (cdr tail))))))))))))
 
 (defun -strip-suffix-then-suffix (dict word skip-hidden)
   (-do-suffixes-of (se1 dict word)
@@ -853,11 +840,14 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                   (-circumfix-flags-p dict (-suffix-cont-flags se2))))
          (-suffix-condition-matches-p se2 word)
          (let ((root (-suffix-to-root se2 word)))
-           (-dolist-until (flags (-homonyms dict root))
-             (and (-cross-valid-p flags (-suffix-flag se2))
-                  (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
-                  (not (and skip-hidden (-hidden-homonym-p flags)))
-                  (cons root flags)))))))
+           (named-let recur ((tail (-homonyms dict root)))
+             (when tail
+               (or (let ((flags (car tail)))
+                     (and (-cross-valid-p flags (-suffix-flag se2))
+                          (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
+                          (not (and skip-hidden (-hidden-homonym-p flags)))
+                          (cons root flags)))
+                   (recur (cdr tail)))))))))
 
 (defun -strip-prefix-then-2-suffixes (dict word skip-hidden)
   (-do-prefixes-of (pe1 dict word)
@@ -881,13 +871,16 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                   (-circumfix-flags-p dict (-suffix-cont-flags se2))))
          (-suffix-condition-matches-p se2 word)
          (let ((root (-suffix-to-root se2 word)))
-           (-dolist-until (flags (-homonyms dict root))
-             (and (or (-cross-valid-p (-suffix-cont-flags se1) (-prefix-flag pe1))
-                      (-cross-valid-p flags (-prefix-flag pe1)))
-                  (-cross-valid-p flags (-suffix-flag se2))
-                  (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
-                  (not (and skip-hidden (-hidden-homonym-p flags)))
-                  (cons root flags)))))))
+           (named-let recur ((tail (-homonyms dict root)))
+             (when tail
+               (or (let ((flags (car tail)))
+                     (and (or (-cross-valid-p (-suffix-cont-flags se1) (-prefix-flag pe1))
+                              (-cross-valid-p flags (-prefix-flag pe1)))
+                          (-cross-valid-p flags (-suffix-flag se2))
+                          (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
+                          (not (and skip-hidden (-hidden-homonym-p flags)))
+                          (cons root flags)))
+                   (recur (cdr tail)))))))))
 
 (defun -strip-suffix-prefix-suffix (dict word skip-hidden)
   (-do-suffixes-of (se1 dict word)
@@ -916,13 +909,16 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
            (and (or ok1 ok2)
                 (-suffix-condition-matches-p se2 word)
                 (let ((root (-suffix-to-root se2 word)))
-                  (-dolist-until (flags (-homonyms dict root))
-                    (and (or (-cross-valid-p (-suffix-cont-flags se2) (-prefix-flag pe1))
-                             (-cross-valid-p flags (-prefix-flag pe1)))
-                         (-cross-valid-p flags (-suffix-flag se2))
-                         (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
-                         (not (and skip-hidden (-hidden-homonym-p flags)))
-                         (cons root flags)))))))))
+                  (named-let recur ((tail (-homonyms dict root)))
+                    (when tail
+                      (or (let ((flags (car tail)))
+                            (and (or (-cross-valid-p (-suffix-cont-flags se2) (-prefix-flag pe1))
+                                     (-cross-valid-p flags (-prefix-flag pe1)))
+                                 (-cross-valid-p flags (-suffix-flag se2))
+                                 (not (-flags-contain flags (-dict-compound-onlyin-flag dict)))
+                                 (not (and skip-hidden (-hidden-homonym-p flags)))
+                                 (cons root flags)))
+                          (recur (cdr tail)))))))))))
 
 ;;;; Simple (non-compound) word checking
 
@@ -930,11 +926,14 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; Check WORD as a single (possibly affixed) dictionary entry.  Return
 ;; (ROOT-WORD . FLAGS) or nil; see the affix-stripping functions above
 ;; for the shape of the result.
-  (or (-dolist-until (flags (-homonyms dict word))
-        (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
-                      (-flags-contain flags (-dict-compound-onlyin-flag dict))
-                      (and skip-hidden (-hidden-homonym-p flags))))
-             (cons word flags)))
+  (or (named-let recur ((tail (-homonyms dict word)))
+        (when tail
+          (or (let ((flags (car tail)))
+                (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
+                              (-flags-contain flags (-dict-compound-onlyin-flag dict))
+                              (and skip-hidden (-hidden-homonym-p flags))))
+                     (cons word flags)))
+              (recur (cdr tail)))))
       (-strip-suffix-only dict :full-word word skip-hidden)
       (-strip-prefix-only dict :full-word word skip-hidden)
       (-strip-prefix-then-suffix-commutative dict :full-word word skip-hidden)
@@ -951,12 +950,15 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                         ((eq mode :compound-middle) (-dict-compound-middle-flag dict))
                         ((eq mode :compound-end) (-dict-compound-last-flag dict))
                         (t 0))))
-    (or (-dolist-until (flags (-homonyms dict word))
-          (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
-                        (not (or (-flags-contain flags (-dict-compound-flag dict))
-                                 (-flags-contain flags cpd-flag)))
-                        (-hidden-homonym-p flags)))
-               (cons word flags)))
+    (or (named-let recur ((tail (-homonyms dict word)))
+          (when tail
+            (or (let ((flags (car tail)))
+                  (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
+                                (not (or (-flags-contain flags (-dict-compound-flag dict))
+                                         (-flags-contain flags cpd-flag)))
+                                (-hidden-homonym-p flags)))
+                       (cons word flags)))
+                (recur (cdr tail)))))
         (-strip-suffix-only dict mode word t)
         (-strip-prefix-only dict mode word t)
         (-strip-prefix-then-suffix-commutative dict mode word t))))
@@ -986,28 +988,40 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; Return non-nil if some REP replacement turns WORD into a correct
 ;; simple word, i.e. WORD is likely a misspelling of that word rather
 ;; than a compound.  Mirrors Nuspell's `Checker::is_rep_similar'.
-  (or (-dolist-until (r (-dict-rep-whole dict))
-        (and (string= word (car r))
-             (-check-simple-word dict (cdr r) t)))
-      (-dolist-until (r (-dict-rep-start dict))
-        (and (string-prefix-p (car r) word)
-             (-check-simple-word
-              dict (concat (cdr r) (substring word (length (car r)))) t)))
-      (-dolist-until (r (-dict-rep-end dict))
-        (and (string-suffix-p (car r) word)
-             (-check-simple-word
-              dict (concat (substring word 0 (- (length word) (length (car r)))) (cdr r)) t)))
-      (-dolist-until (r (-dict-rep-any dict))
-        (let* ((from (car r))
-               (i (and (not (string-empty-p from)) (string-search from word)))
-               (found nil))
-          (while (and i (not found))
-            (setq found (-check-simple-word
-                         dict (concat (substring word 0 i) (cdr r)
-                                      (substring word (+ i (length from))))
-                         t))
-            (setq i (string-search from word (1+ i))))
-          found))))
+  (or (named-let recur ((tail (-dict-rep-whole dict)))
+        (when tail
+          (or (let ((r (car tail)))
+                (and (string= word (car r))
+                     (-check-simple-word dict (cdr r) t)))
+              (recur (cdr tail)))))
+      (named-let recur ((tail (-dict-rep-start dict)))
+        (when tail
+          (or (let ((r (car tail)))
+                (and (string-prefix-p (car r) word)
+                     (-check-simple-word
+                      dict (concat (cdr r) (substring word (length (car r)))) t)))
+              (recur (cdr tail)))))
+      (named-let recur ((tail (-dict-rep-end dict)))
+        (when tail
+          (or (let ((r (car tail)))
+                (and (string-suffix-p (car r) word)
+                     (-check-simple-word
+                      dict (concat (substring word 0 (- (length word) (length (car r)))) (cdr r)) t)))
+              (recur (cdr tail)))))
+      (named-let recur ((tail (-dict-rep-any dict)))
+        (when tail
+          (or (let ((r (car tail)))
+                (let* ((from (car r))
+                       (i (and (not (string-empty-p from)) (string-search from word)))
+                       (found nil))
+                  (while (and i (not found))
+                    (setq found (-check-simple-word
+                                 dict (concat (substring word 0 i) (cdr r)
+                                              (substring word (+ i (length from))))
+                                 t))
+                    (setq i (string-search from word (1+ i))))
+                  found))
+              (recur (cdr tail)))))))
 
 (defun -check-compound-classic (dict mode word start-pos i num-part allow-bad-forceucase)
 ;; Try to split WORD[START-POS:] as a compound with its first part
@@ -1059,19 +1073,22 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                       (-dict-compound-min-length dict)
                     3))
          (len (length word)))
-    (and (>= (- len start-pos) (* 2 min-len))
-         (-dolist-until (i (number-sequence (+ start-pos min-len) (- len min-len)))
-           (-check-compound-classic dict mode word start-pos i num-part
-                                    allow-bad-forceucase)))))
+    (when (>= (- len start-pos) (* 2 min-len))
+      (cl-loop for i from (+ start-pos min-len) to (- len min-len)
+               thereis (-check-compound-classic dict mode word start-pos i num-part
+                                                allow-bad-forceucase)))))
 
 (defun -compound-rules-has-any-flag-p (dict flags)
   (any (lambda (f) (-flags-contain flags f)) (-dict-compound-rules-all-flags dict)))
 
 (defun -find-compound-rule-word (dict word)
-  (-dolist-until (flags (-homonyms dict word))
-    (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
-                  (not (-compound-rules-has-any-flag-p dict flags))))
-         (cons word flags))))
+  (named-let recur ((tail (-homonyms dict word)))
+    (when tail
+      (or (let ((flags (car tail)))
+            (and (not (or (-flags-contain flags (-dict-need-affix-flag dict))
+                          (not (-compound-rules-has-any-flag-p dict flags))))
+                 (cons word flags)))
+          (recur (cdr tail))))))
 
 (defun -match-compound-rule-1 (data pattern)
 ;; Match flag lists DATA (one per word part) against a compound-rule
@@ -1107,24 +1124,27 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                       (-dict-compound-min-length dict)
                     3))
          (len (length word)))
-    (and (>= (- len start-pos) (* 2 min-len))
-         (-dolist-until (i (number-sequence (+ start-pos min-len) (- len min-len)))
-           (-check-time-limit)
-           (let* ((part1-text (substring word start-pos i))
-                  (part1-entry (-find-compound-rule-word dict part1-text)))
-             (and part1-entry
-                  (let* ((words-data1 (cons (cdr part1-entry) words-data))
-                         (part2-text (substring word i))
-                         (part2-entry (-find-compound-rule-word dict part2-text)))
-                    (or (and part2-entry
-                             (let ((words-data2 (cons (cdr part2-entry) words-data1)))
-                               (and (-match-compound-rules dict (reverse words-data2))
-                                    (not (and (/= 0 (-dict-compound-force-uppercase dict))
-                                              (not allow-bad-forceucase)
-                                              (-flags-contain (cdr part2-entry)
-                                                              (-dict-compound-force-uppercase dict))))
-                                    part1-entry)))
-                        (-check-compound-with-rules dict word words-data1 i allow-bad-forceucase)))))))))
+    (when (>= (- len start-pos) (* 2 min-len))
+      (cl-loop
+       for i from (+ start-pos min-len) to (- len min-len)
+       thereis
+       (progn
+         (-check-time-limit)
+         (let* ((part1-text (substring word start-pos i))
+                (part1-entry (-find-compound-rule-word dict part1-text)))
+           (and part1-entry
+                (let* ((words-data1 (cons (cdr part1-entry) words-data))
+                       (part2-text (substring word i))
+                       (part2-entry (-find-compound-rule-word dict part2-text)))
+                  (or (and part2-entry
+                           (let ((words-data2 (cons (cdr part2-entry) words-data1)))
+                             (and (-match-compound-rules dict (reverse words-data2))
+                                  (not (and (/= 0 (-dict-compound-force-uppercase dict))
+                                            (not allow-bad-forceucase)
+                                            (-flags-contain (cdr part2-entry)
+                                                            (-dict-compound-force-uppercase dict))))
+                                  part1-entry)))
+                      (-check-compound-with-rules dict word words-data1 i allow-bad-forceucase))))))))))
 
 (defun -check-compound (dict word allow-bad-forceucase)
   (or (and (or (/= 0 (-dict-compound-flag dict))
@@ -1244,20 +1264,29 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                    (and (-dict-forbid-warn dict)
                         (-flags-contain flags (-dict-warn-flag dict))))))
       (and (/= depth 9)
-           (or (-dolist-until (pat (-dict-break-start dict))
-                 (and (string-prefix-p pat s)
-                      (-spell-break dict (substring s (length pat)) (1+ depth))))
-               (-dolist-until (pat (-dict-break-end dict))
-                 (and (string-suffix-p pat s)
-                      (-spell-break dict (substring s 0 (- (length s) (length pat)))
-                                    (1+ depth))))
-               (-dolist-until (pat (-dict-break-middle dict))
-                 (and (not (string-empty-p pat))
-                      (let ((i (string-search pat s)))
-                        (and i (> i 0) (< i (- (length s) (length pat)))
-                             (-spell-break dict (substring s 0 i) (1+ depth))
-                             (-spell-break dict (substring s (+ i (length pat)))
-                                           (1+ depth)))))))))))
+           (or (named-let recur ((tail (-dict-break-start dict)))
+                 (when tail
+                   (or (let ((pat (car tail)))
+                         (and (string-prefix-p pat s)
+                              (-spell-break dict (substring s (length pat)) (1+ depth))))
+                       (recur (cdr tail)))))
+               (named-let recur ((tail (-dict-break-end dict)))
+                 (when tail
+                   (or (let ((pat (car tail)))
+                         (and (string-suffix-p pat s)
+                              (-spell-break dict (substring s 0 (- (length s) (length pat)))
+                                            (1+ depth))))
+                       (recur (cdr tail)))))
+               (named-let recur ((tail (-dict-break-middle dict)))
+                 (when tail
+                   (or (let ((pat (car tail)))
+                         (and (not (string-empty-p pat))
+                              (let ((i (string-search pat s)))
+                                (and i (> i 0) (< i (- (length s) (length pat)))
+                                     (-spell-break dict (substring s 0 i) (1+ depth))
+                                     (-spell-break dict (substring s (+ i (length pat)))
+                                                   (1+ depth))))))
+                       (recur (cdr tail))))))))))
 
 (defun -number-p (s)
 ;; Return non-nil if S looks like a number (possibly with . , -
@@ -1824,9 +1853,11 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
       (when (eq (aref a i) (aref b i)) (setq count (1+ count))))
     (let (is-swap m1 m2)
       (when (and (= (length a) (length b)) (= (- n count) 2))
-        (-dolist-until (i (number-sequence 0 (1- n)))
-          (unless (eq (aref a i) (aref b i))
-            (if m1 (progn (setq m2 i) t) (progn (setq m1 i) nil))))
+        (let ((i 0))
+          (while (not m2)
+            (unless (eq (aref a i) (aref b i))
+              (if m1 (setq m2 i) (setq m1 i)))
+            (incf i)))
         (setq is-swap (and (eq (aref a m1) (aref b m2)) (eq (aref a m2) (aref b m1)))))
       (cons count is-swap))))
 
@@ -1970,44 +2001,50 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
         (setq guesses (mapcan (lambda (e) (and (cddr e) (list (cons (car e) (cddr e)))))
                               (sort top-guesses :reverse t :in-place t)))
 
-        (-dolist-until (g guesses)
-          (pcase-let ((`(,score . ,word) g))
-            (let* ((lower (downcase word))
-                   (lcs (-longest-common-subsequence-length wrong-word lower)))
-              (if (and (= (length wrong-word) (length lower))
-                       (= (length wrong-word) lcs))
-                  (progn (setcar g (+ score 2000)) t)
-                (let* ((ngram2 (+ (-ngram-similarity-any-mismatch-weighted 2 wrong-word lower wrong-grams)
-                                  (-ngram-similarity-any-mismatch-weighted 2 lower wrong-word)))
-                       (ngram4 (-ngram-similarity-any-mismatch 4 wrong-word lower wrong-grams))
-                       (left-common (-left-common-substring-length wrong-word lower))
-                       (eq-info (-count-eq-chars-at-same-pos wrong-word lower))
-                       (new-score (- (* 2 lcs) (abs (- (length wrong-word) (length lower))))))
-                  (setq new-score (+ new-score left-common ngram2 ngram4))
-                  (when (/= (car eq-info) 0) (setq new-score (1+ new-score)))
-                  (when (cdr eq-info) (setq new-score (+ new-score 10)))
-                  (when (< (* 5 ngram2)
-                           (* (+ (length wrong-word) (length lower))
-                              (- 10 (-dict-max-diff-factor dict))))
-                    (setq new-score (- new-score 1000)))
-                  (setcar g new-score)
-                  nil)))))
+        (named-let recur ((tail guesses))
+          (when tail
+            (or (let ((g (car tail)))
+                  (pcase-let ((`(,score . ,word) g))
+                    (let* ((lower (downcase word))
+                           (lcs (-longest-common-subsequence-length wrong-word lower)))
+                      (if (and (= (length wrong-word) (length lower))
+                               (= (length wrong-word) lcs))
+                          (progn (setcar g (+ score 2000)) t)
+                        (let* ((ngram2 (+ (-ngram-similarity-any-mismatch-weighted 2 wrong-word lower wrong-grams)
+                                          (-ngram-similarity-any-mismatch-weighted 2 lower wrong-word)))
+                               (ngram4 (-ngram-similarity-any-mismatch 4 wrong-word lower wrong-grams))
+                               (left-common (-left-common-substring-length wrong-word lower))
+                               (eq-info (-count-eq-chars-at-same-pos wrong-word lower))
+                               (new-score (- (* 2 lcs) (abs (- (length wrong-word) (length lower))))))
+                          (setq new-score (+ new-score left-common ngram2 ngram4))
+                          (when (/= (car eq-info) 0) (setq new-score (1+ new-score)))
+                          (when (cdr eq-info) (setq new-score (+ new-score 10)))
+                          (when (< (* 5 ngram2)
+                                   (* (+ (length wrong-word) (length lower))
+                                      (- 10 (-dict-max-diff-factor dict))))
+                            (setq new-score (- new-score 1000)))
+                          (setcar g new-score)
+                          nil)))))
+                (recur (cdr tail)))))
         (setq guesses (sort guesses (lambda (a b) (> (car a) (car b)))))
 
         (let* ((more-selective (and guesses (> (car (car guesses)) 1000)))
                (old-num-sugs (-sugs-box-count box))
                (max-sug (min -max-suggestions (+ old-num-sugs (-dict-max-ngram-suggestions dict)))))
-          (-dolist-until (g guesses)
-            (pcase-let ((`(,score . ,word) g))
-              (cond
-               ((= (-sugs-box-count box) max-sug) t)
-               ((and more-selective (<= score 1000)) t)
-               ((and (< score -100)
-                     (or (/= old-num-sugs (-sugs-box-count box)) (-dict-only-max-diff dict)))
-                t)
-               ((any (lambda (sug) (string-search sug word)) (-sugs-list box))
-                (< score -100))
-               (t (-sugs-push box word) nil)))))))))
+          (named-let recur ((tail guesses))
+            (when tail
+              (or (let ((g (car tail)))
+                    (pcase-let ((`(,score . ,word) g))
+                      (cond
+                       ((= (-sugs-box-count box) max-sug) t)
+                       ((and more-selective (<= score 1000)) t)
+                       ((and (< score -100)
+                             (or (/= old-num-sugs (-sugs-box-count box)) (-dict-only-max-diff dict)))
+                        t)
+                       ((any (lambda (sug) (string-search sug word)) (-sugs-list box))
+                        (< score -100))
+                       (t (-sugs-push box word) nil))))
+                  (recur (cdr tail))))))))))
 
 ;;;; Top-level suggestion entry point
 
@@ -2464,11 +2501,14 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; Return the (FROM . TO) entry of TABLE whose FROM is the longest
 ;; match at position I of S, or nil if none matches there.
   (let ((len (length s)))
-    (-dolist-until (p (gethash (aref s i) table))
-      (let ((end (+ i (length (car p)))))
-        (and (<= end len)
-             (eq t (compare-strings (car p) nil nil s i end))
-             p)))))
+    (named-let recur ((tail (gethash (aref s i) table)))
+      (when tail
+        (or (let ((p (car tail)))
+              (let ((end (+ i (length (car p)))))
+                (and (<= end len)
+                     (eq t (compare-strings (car p) nil nil s i end))
+                     p)))
+            (recur (cdr tail)))))))
 
 (defun -substr-replace (table s)
 ;; Apply TABLE's longest-match-at-each-position substitutions
@@ -2716,9 +2756,12 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; named by it that exists, or, if none exists, the file named by its
 ;; first element.
   (let ((formats (ensure-list vibe-spell-personal-dictionary-format)))
-    (or (-dolist-until (fmt formats)
-          (let ((file (format fmt name)))
-            (and (file-exists-p file) file)))
+    (or (named-let recur ((tail formats))
+          (when tail
+            (or (let ((fmt (car tail)))
+                  (let ((file (format fmt name)))
+                    (and (file-exists-p file) file)))
+                (recur (cdr tail)))))
         (format (car formats) name))))
 
 (defun -init-personal-dictionary (dict name)

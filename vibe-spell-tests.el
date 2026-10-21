@@ -154,11 +154,6 @@ vibe-spell.el.")
      "Tests a Hunspell-specific heuristic rejecting a 3-or-more-part compound
 that is a near-typo of an unrelated, longer dictionary word; Nuspell's
 checker, which this ports, has no such heuristic.")
-    (vibe-spell-test-hunspell-morph .
-     "The .good file's multi-word lines (e.g. \"drink eat\") exercise
-Hunspell's own CLI, which checks a line word by word; `vibe-spell-check'
-only ever checks one word, like `Hunspell_spell' itself, so this test
-harness's one-call-per-line reading does not apply here.")
     (vibe-spell-test-hunspell-nepali .
      "Tests ICONV/IGNORE normalization of ZWJ/ZWNJ in Devanagari conjuncts;
 this port's substring replacer does not reproduce Hunspell's exact
@@ -177,10 +172,6 @@ accepted; this multi-word .dic entry mechanism is not implemented
     (vibe-spell-test-hunspell-simplifiedtriple .
      "SIMPLIFIEDTRIPLE's extra \"insert the elided letter back and retry\"
 fallback is not implemented, per the LLM notes to self in vibe-spell.el.")
-    (vibe-spell-test-hunspell-timelimit .
-     "Hunspell gives up on a compound search after 50 ms (its
-TIMELIMIT_MS) and rejects the word; when `vibe-spell-check-time-limit'
-runs out, this port accepts it instead.")
     (vibe-spell-test-hunspell-trace_compound .
      "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
     (vibe-spell-test-hunspell-wordpair .
@@ -197,7 +188,7 @@ than Hunspell's own; Nuspell's test suite marks this one as failing
 too.")
     (vibe-spell-test-hunspell-suggest-checksharpsutf .
      "CHECKSHARPS (German sharp s) suggestion casing variants are narrower
-than Hunspell's own."); Hunspell drops such a suggestion, Nuspell does not.")
+than Hunspell's own; Hunspell drops such a suggestion, Nuspell does not.")
     (vibe-spell-test-hunspell-suggest-nosuggest .
      "NOSUGGEST only filters n-gram suggestions, as in Nuspell, whose
 `add_sug_if_correct' ignores it; Nuspell's test suite marks this one
@@ -227,12 +218,14 @@ a generated `ert-deftest' form when non-nil."
     '(:expected-result :failed)))
 
 (defun vibe-spell-tests--read-words (file)
-  "Return the list of non-blank, whitespace-trimmed lines of FILE.
-Return nil if FILE does not exist."
+  "Return the list of whitespace-separated words of FILE.
+Like Hunspell's and Nuspell's own test runners, a line with several
+words yields each of them separately.  Return nil if FILE does not
+exist."
   (when (file-exists-p file)
     (with-temp-buffer
       (insert-file-contents file)
-      (split-string (buffer-string) "\n" t "[ \t\r]+"))))
+      (split-string (buffer-string)))))
 
 (defun vibe-spell-tests--check (name)
   "Check hunspell test NAME's .good/.wrong word lists against vibe-spell.
@@ -250,9 +243,10 @@ word was misclassified."
         (error
          (cl-return-from nil
            (cons 'fail (format "vibe-spell-create failed: %s" (error-message-string err))))))
-      (let ((bad-good (seq-remove (lambda (w) (vibe-spell-check dict w))
+      ;; For Hunspell, a timeout is a bad word; we return `timeout'.
+      (let ((bad-good (seq-remove (lambda (w) (eq t (vibe-spell-check dict w)))
                                    (vibe-spell-tests--read-words good-file)))
-            (bad-wrong (seq-filter (lambda (w) (vibe-spell-check dict w))
+            (bad-wrong (seq-filter (lambda (w) (eq t (vibe-spell-check dict w)))
                                     (vibe-spell-tests--read-words wrong-file))))
         (if (or bad-good bad-wrong)
             (cons 'fail
@@ -332,7 +326,7 @@ itself failed or the suggestions did not match."
       (let ((sug-lines (vibe-spell-tests--read-lines sug-file))
             (suggested nil))
         (dolist (word (vibe-spell-tests--read-lines wrong-file))
-          (unless (vibe-spell-check dict word)
+          (unless (eq t (vibe-spell-check dict word))
             (let ((got (vibe-spell-suggest dict word)))
               (when got
                 (push (cons word got) suggested)))))

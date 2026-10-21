@@ -127,6 +127,7 @@ SUGGEST-SECONDS SUGGEST-GCS SUGGEST-GC-SECONDS); the
               (forward-line lines)
               (delete-region (point) (point-max)))
             (goto-char (point-min))
+            (garbage-collect)
             (benchmark-run
              (while (re-search-forward (rx (one-or-more (any alpha ?' ?-))) nil t)
                (let ((word (match-string-no-properties 0)))
@@ -136,6 +137,7 @@ SUGGEST-SECONDS SUGGEST-GCS SUGGEST-GC-SECONDS); the
          (`(,suggest-seconds ,suggest-gcs ,suggest-gc-seconds)
           (when suggest
             (setq misspelled (nreverse misspelled))
+            (garbage-collect)
             (benchmark-run
              (dolist (word misspelled)
                (incf suggestion-count (length (vibe-spell-suggest dict word))))))))
@@ -144,7 +146,7 @@ benchmark:  %s %s %s
 load dict:  %.3fs, %d GCs taking %.3fs
 check:      %d words, %d correct
             %.3fs total, %d GCs taking %.3fs
-            %.2f µs/word"
+            %.2f µs/word, %.2f µs/word excluding GC"
                (if (native-comp-function-p (symbol-function 'vibe-spell-check))
                    "native"
                  "bytecomp")
@@ -152,15 +154,18 @@ check:      %d words, %d correct
                load-seconds load-gcs load-gc-seconds
                word-count correct-count
                check-seconds check-gcs check-gc-seconds
-               (/ (* 1e6 check-seconds) (max 1 word-count)))
+               (/ (* 1e6 check-seconds) (max 1 word-count))
+               (/ (* 1e6 (- check-seconds check-gc-seconds)) (max 1 word-count)))
       (when suggest
         (message "\
 suggest:    %d words, %d suggestions
             %.3fs total, %d GCs taking %.3fs
-            %.2f ms/word"
+            %.2f ms/word, %.2f ms/word excluding GC"
                  (length misspelled) suggestion-count
                  suggest-seconds suggest-gcs suggest-gc-seconds
-                 (/ (* 1e3 suggest-seconds) (max 1 (length misspelled)))))
+                 (/ (* 1e3 suggest-seconds) (max 1 (length misspelled)))
+                 (/ (* 1e3 (- suggest-seconds suggest-gc-seconds))
+                    (max 1 (length misspelled)))))
       (append (list word-count correct-count load-seconds load-gcs load-gc-seconds
                     check-seconds check-gcs check-gc-seconds)
               (and suggest
