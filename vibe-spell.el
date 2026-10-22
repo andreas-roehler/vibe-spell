@@ -201,8 +201,11 @@ Return non-nil if WORD was actually present and therefore removed."
 ;; Besides the limitations listed in the Commentary, the following
 ;; simplifications were made relative to upstream Nuspell:
 ;;
-;; - CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not
-;;   enforced.
+;; - For CHECKCOMPOUNDPATTERN's "0" (first word not modified by an
+;;   affix), a compound part counts as modified when its root differs
+;;   from its text, rather than when its affix has a non-empty strip or
+;;   append; the two only disagree for an affix that strips exactly
+;;   what it appends.
 ;; - PHONE is not parsed; Nuspell's own `Suggester' never calls it
 ;;   either.
 ;; - MAXCPDSUGS, SUBSTANDARD, NOSPLITSUGS and SUGSWITHDOTS are not
@@ -320,6 +323,13 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
   ;; interchangeable.
   (chars "") (strings nil))
 
+(cl-defstruct (-compound-pattern (:constructor -compound-pattern-create))
+  ;; One CHECKCOMPOUNDPATTERN entry.  TEXT is the first word's ending
+  ;; followed by the second word's beginning, and IDX the length of
+  ;; the former, so that the join is at IDX.  REPLACEMENT, if non-nil,
+  ;; is how TEXT is written at the join instead.
+  text idx replacement (first-flag 0) (second-flag 0) first-unmodified)
+
 (cl-defstruct (-dict (:constructor -dict-create))
   (words nil)                          ; hash-table: word -> (LOWERCASED . list of flag lists)
   (pdict nil)                          ; personal dictionary file name
@@ -357,6 +367,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
   (compound-check-case nil)
   (compound-check-triple nil)
   (compound-check-rep nil)
+  (compound-patterns nil)              ; list of `-compound-pattern'
   ;; suggestion options
   (try-chars "")
   (keyboard-closeness "")
@@ -743,6 +754,9 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 (defun -strip-suffix-only (dict mode word skip-hidden)
   (-do-suffixes-of (se dict word)
     (and (not (or (-outer-suffix-not-valid-p dict mode se)
+                  (and (eq mode :compound-end)
+                       (not (string-empty-p (-suffix-appending se)))
+                       (-flags-contain (-suffix-cont-flags se) (-dict-compound-onlyin-flag dict)))
                   (-circumfix-flags-p dict (-suffix-cont-flags se))))
          (-suffix-condition-matches-p se word)
          (let ((root (-suffix-to-root se word)))
@@ -1042,6 +1056,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                 (success2
                  (and part2-entry
                       (not (-flags-contain (cdr part2-entry) (-dict-forbiddenword-flag dict)))
+                      (not (-compound-pattern-forbids-p dict word i part1-text part1-entry part2-entry))
                       (not (and (-dict-compound-check-duplicate dict)
                                 (eq (cdr part1-entry) (cdr part2-entry))))
                       (not (and (-dict-compound-check-rep dict)
@@ -1057,6 +1072,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
              (let ((part2-entry (-check-compound-split dict :compound-middle word i
                                                        (1+ num-part1) allow-bad-forceucase)))
                (and part2-entry
+                    (not (-compound-pattern-forbids-p dict word i part1-text part1-entry part2-entry))
                     ;; Also try the first two parts alone, when the
                     ;; second is an unaffixed dictionary word.
                     (not (and (-dict-compound-check-rep dict)
@@ -1075,8 +1091,98 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
          (len (length word)))
     (when (>= (- len start-pos) (* 2 min-len))
       (cl-loop for i from (+ start-pos min-len) to (- len min-len)
-               thereis (-check-compound-classic dict mode word start-pos i num-part
-                                                allow-bad-forceucase)))))
+               thereis (or (-check-compound-classic dict mode word start-pos i num-part
+                                                    allow-bad-forceucase)
+                           (and (-dict-compound-patterns dict)
+                                (-check-compound-with-pattern-replacements
+                                 dict mode word start-pos i num-part allow-bad-forceucase)))))))
+
+(defun -string-at-p (s word i)
+;; Return non-nil if string S occurs in WORD at index I.
+  (let ((end (+ i (length s))))
+    (and (<= end (length word))
+         (eq t (compare-strings s nil nil word i end)))))
+
+(defun -compound-pattern-flag-ok-p (flag flags)
+;; Return non-nil if a pattern's condition FLAG, 0 for none, is in FLAGS.
+  (or (zerop flag) (-flags-contain flags flag)))
+
+(defun -compound-pattern-forbids-p (dict word i part1-text part1-entry part2-entry)
+;; Return non-nil if one of DICT's CHECKCOMPOUNDPATTERNs forbids the
+;; join at index I of WORD between PART1-ENTRY, found for PART1-TEXT,
+;; and PART2-ENTRY.  Mirrors Nuspell's
+;; `is_compound_forbidden_by_patterns'.
+  (and (-dict-compound-patterns dict)
+       (any (lambda (p)
+              (let ((idx (-compound-pattern-idx p)))
+                (and (>= i idx)
+                     (-string-at-p (-compound-pattern-text p) word (- i idx))
+                     (-compound-pattern-flag-ok-p (-compound-pattern-first-flag p)
+                                                  (cdr part1-entry))
+                     (-compound-pattern-flag-ok-p (-compound-pattern-second-flag p)
+                                                  (cdr part2-entry))
+                     ;; Nuspell asks whether the first word's affix
+                     ;; has a non-empty strip or append; here, that is
+                     ;; whether its root differs from its text.
+                     (not (and (-compound-pattern-first-unmodified p)
+                               (not (string= (car part1-entry) part1-text)))))))
+            (-dict-compound-patterns dict))))
+
+(defun -check-compound-with-pattern-replacements (dict mode word start-pos i num-part
+                                                       allow-bad-forceucase)
+;; Like `-check-compound-classic', but for a join at index I of WORD
+;; written with a CHECKCOMPOUNDPATTERN replacement, which is split as
+;; if it were the pattern's text instead.  Mirrors Nuspell's
+;; `check_compound_with_pattern_replacements', minus its
+;; SIMPLIFIEDTRIPLE fallback.
+  (named-let recur ((tail (-dict-compound-patterns dict)))
+    (when tail
+      (let* ((p (car tail))
+             (repl (-compound-pattern-replacement p)))
+        (if (not (and repl (-string-at-p repl word i)))
+            (recur (cdr tail))
+          (let* ((word2 (concat (substring word 0 i) (-compound-pattern-text p)
+                                (substring word (+ i (length repl)))))
+                 (i2 (+ i (-compound-pattern-idx p)))
+                 (part1-entry (-check-word-in-compound dict mode (substring word2 start-pos i2))))
+            (if (not (and part1-entry
+                          (not (-flags-contain (cdr part1-entry) (-dict-forbiddenword-flag dict)))
+                          (-compound-pattern-flag-ok-p (-compound-pattern-first-flag p)
+                                                       (cdr part1-entry))
+                          (not (and (-dict-compound-check-triple dict)
+                                    (-three-equal-at-boundary-p word2 i2)))))
+                (recur (cdr tail))
+              (let ((part2-entry (-check-word-in-compound dict :compound-end (substring word2 i2))))
+                (if (and part2-entry
+                         (not (-flags-contain (cdr part2-entry) (-dict-forbiddenword-flag dict)))
+                         (-compound-pattern-flag-ok-p (-compound-pattern-second-flag p)
+                                                      (cdr part2-entry))
+                         (not (and (-dict-compound-check-duplicate dict)
+                                   (eq (cdr part1-entry) (cdr part2-entry))))
+                         (not (and (-dict-compound-check-rep dict)
+                                   (-rep-similar-p dict (substring word start-pos))))
+                         (not (and (/= 0 (-dict-compound-force-uppercase dict))
+                                   (not allow-bad-forceucase)
+                                   (-flags-contain (cdr part2-entry)
+                                                   (-dict-compound-force-uppercase dict)))))
+                    ;; As in Nuspell, too many parts ends the search
+                    ;; at this join, without trying further patterns.
+                    (and (not (and (/= 0 (-dict-compound-max-word-count dict))
+                                   (>= (1+ num-part) (-dict-compound-max-word-count dict))))
+                         part1-entry)
+                  (let ((part2-entry (-check-compound-split dict :compound-middle word2 i2
+                                                            (1+ num-part) allow-bad-forceucase)))
+                    (if (and part2-entry
+                             (-compound-pattern-flag-ok-p (-compound-pattern-second-flag p)
+                                                          (cdr part2-entry))
+                             (not (and (-dict-compound-check-rep dict)
+                                       (or (-rep-similar-p dict (substring word start-pos))
+                                           (and (-string-at-p (car part2-entry) word2 i2)
+                                                (-rep-similar-p
+                                                 dict (substring word2 start-pos
+                                                                 (+ i2 (length (car part2-entry))))))))))
+                        part1-entry
+                      (recur (cdr tail)))))))))))))
 
 (defun -compound-rules-has-any-flag-p (dict flags)
   (any (lambda (f) (-flags-contain flags f)) (-dict-compound-rules-all-flags dict)))
@@ -2398,6 +2504,29 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
     ('long (-parse-compound-rule-grouped (-flag-bytes dict str) 2))
     ('num (-parse-compound-rule-grouped str nil))))
 
+(defun -parse-compound-pattern (dict args)
+;; Parse the fields ARGS of a CHECKCOMPOUNDPATTERN line into a
+;; `-compound-pattern', or nil if there are fewer than two.  The first
+;; two fields are each TEXT or TEXT/FLAG; a first TEXT of "0" stands
+;; for empty text matching only a first word that no affix modified.
+;; As in Hunspell and Nuspell, the third field, if any, is the
+;; replacement, even when it is the start of a trailing comment.
+  (when (cdr args)
+    (pcase-let* ((`((,end . ,first-flag) (,begin . ,second-flag))
+                  (mapcar (lambda (field)
+                            (let ((i (string-search "/" field)))
+                              (if i
+                                  (cons (substring field 0 i)
+                                        (or (car (-decode-flags dict (substring field (1+ i)))) 0))
+                                (cons field 0))))
+                          (take 2 args)))
+                 (unmodified (string= end "0"))
+                 (end (if unmodified "" end)))
+      (-compound-pattern-create :text (concat end begin) :idx (length end)
+                                :replacement (nth 2 args)
+                                :first-flag first-flag :second-flag second-flag
+                                :first-unmodified unmodified))))
+
 (defun -partition-break-patterns (patterns)
 ;; Partition raw BREAK pattern strings into (START END MIDDLE) lists.
 ;; A pattern beginning with "^" is a start-of-word pattern (with the
@@ -2582,7 +2711,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
       (delete-char 1))
     (let ((prefixes nil) (suffixes nil)
           (break-patterns nil) (break-seen nil)
-          (compound-rules nil) (flag-aliases nil)
+          (compound-rules nil) (compound-patterns nil) (flag-aliases nil)
           (rep-pairs nil) (similarities nil)
           (iconv-pairs nil) (oconv-pairs nil)
           (wordchars "")
@@ -2690,6 +2819,10 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                 (pcase (-array-command-step cmd-counts command (car args))
                   ('data (push (-parse-compound-rule-line dict (car args))
                                compound-rules))))
+               ((string= command "CHECKCOMPOUNDPATTERN")
+                (pcase (-array-command-step cmd-counts command (car args))
+                  ('data (when-let* ((p (-parse-compound-pattern dict args)))
+                           (push p compound-patterns)))))
                ((string= command "REP")
                 (pcase (-array-command-step cmd-counts command (car args))
                   ('data (push (cons (nth 0 args) (string-replace "_" " " (nth 1 args)))
@@ -2703,7 +2836,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                ((string= command "OCONV")
                 (pcase (-array-command-step cmd-counts command (car args))
                   ('data (push (cons (nth 0 args) (nth 1 args)) oconv-pairs))))
-               ((member command '("PHONE" "CHECKCOMPOUNDPATTERN" "AM"))
+               ((member command '("PHONE" "AM"))
                 (-array-command-step cmd-counts command (car args)))
                (t nil)))))
         (forward-line 1))
@@ -2724,6 +2857,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
         (setf (-dict-break-end dict) (nth 1 parts))
         (setf (-dict-break-middle dict) (nth 2 parts)))
       (setf (-dict-compound-rules dict) (nreverse compound-rules))
+      (setf (-dict-compound-patterns dict) (nreverse compound-patterns))
       (setf (-dict-compound-rules-all-flags dict)
             (-compute-compound-rules-all-flags (-dict-compound-rules dict)))
       (setf (-dict-flag-aliases dict) (vconcat (nreverse flag-aliases)))

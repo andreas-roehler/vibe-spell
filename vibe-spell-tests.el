@@ -83,11 +83,7 @@
   (error "vibe-spell-tests: no such directory %s" vibe-spell-tests-hunspell-dir))
 
 (defconst vibe-spell-tests-known-failures
-  '((vibe-spell-test-hunspell-2970240 .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    (vibe-spell-test-hunspell-2970242 .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    (vibe-spell-test-hunspell-alias3 .
+  '((vibe-spell-test-hunspell-alias3 .
      "COMPLEXPREFIXES is not supported; `vibe-spell-create' refuses the
 dictionary, per the Commentary in vibe-spell.el.")
     (vibe-spell-test-hunspell-base_utf .
@@ -98,20 +94,15 @@ upcase/downcase, per the Commentary in vibe-spell.el.")
 BREAK handling, which this ports, only retries the first occurrence of
 each pattern per split attempt, so a word with more than one break
 point fails here too.")
-    (vibe-spell-test-hunspell-checkcompoundpattern .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    (vibe-spell-test-hunspell-checkcompoundpattern2 .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    (vibe-spell-test-hunspell-checkcompoundpattern3 .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    (vibe-spell-test-hunspell-checkcompoundpattern4 .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
     (vibe-spell-test-hunspell-checkcompoundpattern5 .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+     "The pattern's condition flag arrives through an affix's continuation
+class; like Nuspell, this port only looks at the root's own flags.")
     (vibe-spell-test-hunspell-checkcompoundpattern6 .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+     "The pattern's condition flag arrives through an affix's continuation
+class; like Nuspell, this port only looks at the root's own flags.")
     (vibe-spell-test-hunspell-checkcompoundpattern7 .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
+     "The pattern's condition flag arrives through an affix's continuation
+class; like Nuspell, this port only looks at the root's own flags.")
     (vibe-spell-test-hunspell-complexprefixes .
      "COMPLEXPREFIXES is not supported; `vibe-spell-create' refuses the
 dictionary, per the Commentary in vibe-spell.el.")
@@ -158,12 +149,6 @@ checker, which this ports, has no such heuristic.")
      "Tests ICONV/IGNORE normalization of ZWJ/ZWNJ in Devanagari conjuncts;
 this port's substring replacer does not reproduce Hunspell's exact
 normalization here.")
-    (vibe-spell-test-hunspell-onlyincompound2 .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    (vibe-spell-test-hunspell-opentaal_cpdpat .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
-    (vibe-spell-test-hunspell-opentaal_cpdpat2 .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
     (vibe-spell-test-hunspell-ph2 .
      "A dictionary entry with an embedded space (e.g. \"forbidden root\") is
 meant to block the squished-together compound from also being
@@ -172,8 +157,6 @@ accepted; this multi-word .dic entry mechanism is not implemented
     (vibe-spell-test-hunspell-simplifiedtriple .
      "SIMPLIFIEDTRIPLE's extra \"insert the elided letter back and retry\"
 fallback is not implemented, per the LLM notes to self in vibe-spell.el.")
-    (vibe-spell-test-hunspell-trace_compound .
-     "CHECKCOMPOUNDPATTERN is not parsed; such restrictions are not enforced.")
     (vibe-spell-test-hunspell-wordpair .
      "A dictionary entry with an embedded space (e.g. \"compound word\") is
 meant to block the squished-together compound (\"compoundword\") from
