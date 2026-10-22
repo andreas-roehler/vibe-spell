@@ -2210,40 +2210,32 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 
 ;;;; Dictionary (.dic) parsing
 
-(defun -parse-dic-line (line)
-;; Parse a .dic LINE into (WORD . FLAGS-STRING-OR-NIL), or nil.
-;; Morphological fields, if any, are discarded.  A backslash-escaped
-;; slash within the word is unescaped and kept as a literal character.
-  (when (and (> (length line) 0) (eq (aref line (1- (length line))) ?\r))
-    (setq line (substring line 0 -1)))
-  (let ((i 0) (n (length line)) (word-chars nil) flags-str (done nil))
-    (while (and (< i n) (not done))
-      (let ((c (aref line i)))
-        (cond
-         ((and (eq c ?\\) (< (1+ i) n) (eq (aref line (1+ i)) ?/))
-          (push ?/ word-chars)
-          (setq i (+ i 2)))
-         ;; A "/" at the very start of the line is a literal
-         ;; character, not a flags separator -- this is what lets a
-         ;; word like "/usr/share/myspell/" start with "/" without
-         ;; escaping it, and is how a bare "/" is written as a word.
-         ((and (eq c ?/) (= i 0))
-          (push c word-chars)
-          (setq i (1+ i)))
-         ((eq c ?/)
-          (let ((j (1+ i)))
-            (while (and (< j n) (not (memq (aref line j) '(?\s ?\t))))
-              (setq j (1+ j)))
-            (setq flags-str (substring line (1+ i) j)))
-          (setq done t))
-         ((memq c '(?\s ?\t))
-          (setq done t))
-         (t
-          (push c word-chars)
-          (setq i (1+ i))))))
-    (if word-chars
-        (cons (concat (nreverse word-chars)) flags-str)
-      nil)))
+(defun -parse-dic-line ()
+;; Parse the .dic line starting at point into (WORD
+;; . FLAGS-STRING-OR-NIL), or nil if it has no word; point is left
+;; somewhere on that line.  As in Nuspell, the entry ends at a tab, or
+;; at a space followed by a morphological field or by nothing else;
+;; any other space is part of a multi-word entry, like "ad hoc".
+;; Within the entry, the first "/" other than a leading one starts the
+;; flags, and a backslash-escaped slash is kept as a literal "/".
+  (let ((case-fold-search nil)
+        (start (point)))
+    (if (re-search-forward (rx (or "\t" (: " " (* (any " \t")) (= 2 (any "a-z")) ":")))
+                           (pos-eol) t)
+        (goto-char (match-beginning 0))
+      (end-of-line)
+      (skip-chars-backward " \r" start))
+    (let ((end (point)) (slash nil))
+      (unless (= start end)
+        ;; Skip the first character, since a leading "/" is literal.
+        (goto-char (1+ start))
+        (while (and (setq slash (search-forward "/" end t))
+                    (eq (char-before (1- slash)) ?\\)))
+        (cons (string-replace "\\/" "/" (buffer-substring-no-properties
+                                         start (if slash (1- slash) end)))
+              (and slash
+                   (buffer-substring-no-properties
+                    slash (progn (skip-chars-forward "^ " end) (point)))))))))
 
 (defun -add-homonym (table word flags)
 ;; Append a homonym entry with FLAGS to WORD's entry in words TABLE.
@@ -2333,14 +2325,12 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
       (setf (-dict-words dict) (make-hash-table :test 'equal :size (max count 65))))
     (forward-line 1)
     (while (not (eobp))
-      (let* ((line (buffer-substring-no-properties (pos-bol) (pos-eol)))
-             (parsed (-parse-dic-line line)))
-        (when parsed
-          (let* ((word (-erase-chars (car parsed) (-dict-ignored-chars dict)))
-                 (flags-str (cdr parsed))
-                 (flags (and flags-str (-decode-flags-possible-alias dict flags-str))))
-            (unless (string-empty-p word)
-              (-dict-add-word dict word flags)))))
+      (when-let* ((parsed (-parse-dic-line)))
+        (let* ((word (-erase-chars (car parsed) (-dict-ignored-chars dict)))
+               (flags-str (cdr parsed))
+               (flags (and flags-str (-decode-flags-possible-alias dict flags-str))))
+          (unless (string-empty-p word)
+            (-dict-add-word dict word flags))))
       (forward-line 1))))
 
 ;;;; Affix (.aff) parsing
