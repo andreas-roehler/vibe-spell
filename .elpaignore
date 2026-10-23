@@ -1,0 +1,5 @@
+AGENTS.md
+Makefile
+hunspell-check.c
+vibe-spell-bench.el
+vibe-spell-tests.el

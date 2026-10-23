@@ -2,7 +2,7 @@ EMACS ?= emacs
 BATCH = $(EMACS) --batch -L .
 BATCH_NO_NATIVE = $(BATCH) --eval '(setq native-comp-eln-load-path nil)'
 
-EL = vibe-spell.el vibe-spell-tests.el vibe-spell-bench.el
+EL = vibe-spell.el vibe-spell-tests.el vibe-spell-bench.el vibe-spell-compare.el
 ELC = $(EL:.el=.elc)
 
 all: $(ELC)
@@ -31,8 +31,28 @@ $(HUNSPELL_BUILD)/%.o: hunspell/src/hunspell/%.cxx
 $(HUNSPELL_LIB): $(HUNSPELL_OBJS)
 	$(AR) rcs $@ $^
 
-.tmp/hunspell-bench: hunspell-bench.c $(HUNSPELL_LIB)
+.tmp/hunspell-check: hunspell-check.c $(HUNSPELL_LIB)
 	$(CC) -O2 -DHUNSPELL_STATIC -Ihunspell/src -o $@ $< $(HUNSPELL_LIB) -lstdc++
+
+# The hunspell command-line tool, handy for its --trace option.  It wants
+# a config.h, which normally comes from configure; this minimal one is
+# enough on a glibc system.
+HUNSPELL_PARSERS = textparser htmlparser latexparser manparser \
+	firstparser xmlparser odfparser
+HUNSPELL_VERSION = $(shell sed -n 's/^AC_INIT.\[hunspell\],\[\([^]]*\)\].*/\1/p' \
+	hunspell/configure.ac)
+
+$(HUNSPELL_BUILD)/config.h:
+	mkdir -p $(@D)
+	printf '%s\n' '#define HAVE_ICONV 1' '#define ICONV_CONST' \
+		'#define HAVE_LOCALE_H 1' '#define HAVE_LANGINFO_H 1' \
+		'#define VERSION "$(HUNSPELL_VERSION)"' '#define DATADIR ""' > $@
+
+$(HUNSPELL_BUILD)/hunspell: hunspell/src/tools/hunspell.cxx \
+		$(HUNSPELL_PARSERS:%=hunspell/src/parsers/%.cxx) \
+		$(HUNSPELL_BUILD)/config.h $(HUNSPELL_LIB)
+	$(CXX) -O2 -DHUNSPELL_STATIC -I$(HUNSPELL_BUILD) -Ihunspell/src/hunspell \
+		-o $@ $(filter %.cxx,$^) $(HUNSPELL_LIB)
 
 hunspell:
 	git clone https://github.com/hunspell/hunspell.git $@
@@ -40,75 +60,102 @@ hunspell:
 nuspell:
 	git clone https://github.com/nuspell/nuspell.git $@
 
-# Benchmark texts and dictionaries.  The dictionaries come from pinned
-# Debian trixie packages, so that the C and Lisp benchmarks load the
-# same files on every machine; each target downloads its package to
-# .tmp and extracts the .aff/.dic pair (the .dic comes along with the
-# .aff).
+# Benchmark texts and dictionaries.
 DATA = data/alice.txt data/lusiadas.txt data/mujeong.txt data/egri.txt \
-	data/verwandlung.txt data/en_US.aff data/pt_BR.aff data/ko_KR.aff \
-	data/hu_HU.aff data/de_DE.aff
+	data/verwandlung.txt data/hunspell-dictionary
 
 .PHONY: data
 data: $(DATA)
 
-data/alice.txt:
-	mkdir -p data .tmp
+# Everything in data/ is downloaded, so mark it as a cache directory
+# (see https://bford.info/cachedir/) for backup tools to skip.
+data/CACHEDIR.TAG:
+	mkdir -p data
+	printf '%s\n' 'Signature: 8a477f597d28d172789f06886806bc55' \
+		'# This file is a cache directory tag created by vibe-spell.' \
+		'# For information about cache directory tags, see:' \
+		'#	https://bford.info/cachedir/' > $@
+
+data/alice.txt: | data/CACHEDIR.TAG
+	mkdir -p .tmp
 	curl -fL -o .tmp/$(@F) https://www.gutenberg.org/ebooks/11.txt.utf-8
 	sed -e '1,/^\*\*\* START OF/d' -e '/^\*\*\* END OF/,$$d' .tmp/$(@F) > $@
 
-data/lusiadas.txt:
-	mkdir -p data .tmp
+data/lusiadas.txt: | data/CACHEDIR.TAG
+	mkdir -p .tmp
 	curl -fL -o .tmp/$(@F) https://www.gutenberg.org/ebooks/3333.txt.utf-8
 	sed -e '1,/^\*\*\* START OF/d' -e '/^\*\*\* END OF/,$$d' .tmp/$(@F) > $@
 
 # First part (chapters 1-20) of Yi Kwang-su's Mujeong, from Korean
 # Wikisource; the sed script drops the wiki templates (the page header
 # and the paragraph-break markers), leaving plain text.
-data/mujeong.txt:
-	mkdir -p data
+data/mujeong.txt: | data/CACHEDIR.TAG
 	curl -L -A vibe-spell-bench \
 		'https://ko.wikisource.org/w/index.php?title=%EB%AC%B4%EC%A0%95/1%EC%9E%A5~20%EC%9E%A5&action=raw' \
 		| sed -e '/^{{.*}}$$/d' -e '/^{{/,/^}}$$/d' > $@
 
 # First volume of Gárdonyi Géza's Az egri csillagok.
-data/egri.txt:
-	mkdir -p data .tmp
+data/egri.txt: | data/CACHEDIR.TAG
+	mkdir -p .tmp
 	curl -fL -o .tmp/$(@F) https://www.gutenberg.org/ebooks/76235.txt.utf-8
 	sed -e '1,/^\*\*\* START OF/d' -e '/^\*\*\* END OF/,$$d' .tmp/$(@F) > $@
 
-data/verwandlung.txt:
-	mkdir -p data .tmp
+data/verwandlung.txt: | data/CACHEDIR.TAG
+	mkdir -p .tmp
 	curl -fL -o .tmp/$(@F) https://www.gutenberg.org/ebooks/22367.txt.utf-8
 	sed -e '1,/^\*\*\* START OF/d' -e '/^\*\*\* END OF/,$$d' .tmp/$(@F) > $@
 
-DEBIAN_POOL = http://deb.debian.org/debian/pool/main
-DEB_en_US = $(DEBIAN_POOL)/s/scowl/hunspell-en-us_2020.12.07-4_all.deb
-DEB_pt_BR = $(DEBIAN_POOL)/libr/libreoffice-dictionaries/hunspell-pt-br_25.2.3-1_all.deb
-DEB_ko_KR = $(DEBIAN_POOL)/h/hunspell-dict-ko/hunspell-ko_0.7.94-2_all.deb
-DEB_hu_HU = $(DEBIAN_POOL)/libr/libreoffice-dictionaries/hunspell-hu_25.2.3-1_all.deb
-DEB_de_DE = $(DEBIAN_POOL)/i/igerman98/hunspell-de-de_20161207-15_all.deb
-# The file name in the package, where it differs from the target's.
-DEB_NAME_ko_KR = ko
+# Every Debian sid package providing hunspell-dictionary, as listed on
+# packages.debian.org, except the myspell-* ones and, of the French
+# variants (which all ship fr.aff), all but hunspell-fr-classical, the
+# first choice of the hunspell-fr metapackage.  The .aff/.dic files
+# (minus symlinks) go straight to data/.  The package file names are
+# looked up in the sid index; all these packages are Arch: all.
+DEBIAN_MIRROR = http://deb.debian.org/debian
+HUNSPELL_DICT_SKIP = ^myspell-|^hunspell-fr-(revised|comprehensive)$$
 
-data/%.aff:
-	mkdir -p data .tmp
-	curl -L -o .tmp/$*.deb $(DEB_$*)
-	ar p .tmp/$*.deb data.tar.xz \
-		| tar -xJO ./usr/share/hunspell/$(or $(DEB_NAME_$*),$*).dic > data/$*.dic
-	ar p .tmp/$*.deb data.tar.xz \
-		| tar -xJO ./usr/share/hunspell/$(or $(DEB_NAME_$*),$*).aff > $@
+data/hunspell-dictionary: | data/CACHEDIR.TAG
+	mkdir -p .tmp/debian
+	curl -fsSL https://packages.debian.org/sid/hunspell-dictionary \
+		| grep -o 'href="/sid/[^"/]*"' | cut -d/ -f3 | tr -d '"' \
+		| grep -Ev '$(HUNSPELL_DICT_SKIP)' \
+		> .tmp/debian/hunspell-dictionary.txt
+	curl -fsSL -o .tmp/debian/Packages.xz \
+		$(DEBIAN_MIRROR)/dists/sid/main/binary-all/Packages.xz
+	xz -dc .tmp/debian/Packages.xz \
+		| awk 'NR == FNR { want[$$1]; next } \
+		       /^Package:/ { p = $$2 } \
+		       /^Filename:/ && p in want { print p, $$2 }' \
+		      .tmp/debian/hunspell-dictionary.txt - \
+		| while read pkg file; do \
+			curl -fsSL -o .tmp/debian/$$pkg.deb $(DEBIAN_MIRROR)/$$file \
+			&& rm -rf .tmp/debian/$$pkg && mkdir .tmp/debian/$$pkg \
+			&& ar p .tmp/debian/$$pkg.deb data.tar.xz \
+				| tar -xJ -C .tmp/debian/$$pkg --strip-components=4 --wildcards \
+					'./usr/share/hunspell/*.aff' './usr/share/hunspell/*.dic' \
+			&& find .tmp/debian/$$pkg -type f -exec cp -t data {} + \
+			|| exit 1; \
+		done
+	touch $@
 
 .PHONY: tests
 tests: hunspell nuspell
 	$(BATCH) -l ert -l vibe-spell-tests.el -f ert-run-tests-batch-and-exit
 
+# Check that vibe-spell and Hunspell find the same misspelled words in
+# Emacs's etc/HELLO (or COMPARE_FILE), for every dictionary in data/.
+COMPARE_FILE ?=
+
+.PHONY: compare
+compare: data/hunspell-dictionary all .tmp/hunspell-check
+	$(BATCH) -l vibe-spell-compare.el -f vibe-spell-compare $(COMPARE_FILE)
+
 BENCH_FLAGS ?=
 
 .PHONY: bench
-bench: $(DATA) all .tmp/hunspell-bench
+bench: $(DATA) all .tmp/hunspell-check
 	@echo ================================================================================
-	@.tmp/hunspell-bench $(BENCH_FLAGS) en_US data/alice.txt
+	@.tmp/hunspell-check $(BENCH_FLAGS) en_US data/alice.txt
 	@echo --------------------------------------------------------------------------------
 	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) en_US data/alice.txt
 	@echo --------------------------------------------------------------------------------
@@ -116,26 +163,26 @@ bench: $(DATA) all .tmp/hunspell-bench
 # Suggestions for Korean take too long to be worth benchmarking.
 ifeq ($(filter --suggest,$(BENCH_FLAGS)),)
 	@echo ================================================================================
-	@.tmp/hunspell-bench $(BENCH_FLAGS) ko_KR data/mujeong.txt
+	@.tmp/hunspell-check $(BENCH_FLAGS) ko data/mujeong.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) ko_KR data/mujeong.txt
+	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) ko data/mujeong.txt
 	@echo --------------------------------------------------------------------------------
-	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) ko_KR data/mujeong.txt
+	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) ko data/mujeong.txt
 endif
 	@echo ================================================================================
-	@.tmp/hunspell-bench $(BENCH_FLAGS) pt_BR data/lusiadas.txt
+	@.tmp/hunspell-check $(BENCH_FLAGS) pt_BR data/lusiadas.txt
 	@echo --------------------------------------------------------------------------------
 	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) pt_BR data/lusiadas.txt
 	@echo --------------------------------------------------------------------------------
 	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) pt_BR data/lusiadas.txt
 	@echo ================================================================================
-	@.tmp/hunspell-bench $(BENCH_FLAGS) de_DE data/verwandlung.txt
+	@.tmp/hunspell-check $(BENCH_FLAGS) de_DE data/verwandlung.txt
 	@echo --------------------------------------------------------------------------------
 	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) de_DE data/verwandlung.txt
 	@echo --------------------------------------------------------------------------------
 	@$(BATCH_NO_NATIVE) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) de_DE data/verwandlung.txt
 	@echo ================================================================================
-	@.tmp/hunspell-bench $(BENCH_FLAGS) hu_HU data/egri.txt
+	@.tmp/hunspell-check $(BENCH_FLAGS) hu_HU data/egri.txt
 	@echo --------------------------------------------------------------------------------
 	@$(BATCH) -l vibe-spell-bench.el -f vibe-spell-bench $(BENCH_FLAGS) hu_HU data/egri.txt
 	@echo --------------------------------------------------------------------------------

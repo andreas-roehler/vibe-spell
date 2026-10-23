@@ -34,7 +34,7 @@
 ;; occurrence the check found, in a separately timed pass after it.
 ;; With --lines N, only the first N lines of the file are used.
 ;;
-;; hunspell-bench.c is the C counterpart, measuring Hunspell the
+;; hunspell-check.c is the C counterpart, measuring Hunspell the
 ;; same way on the same files (see the Makefile's bench target).
 ;; Dictionaries are loaded only from the project's data/ directory,
 ;; where the Makefile puts them, and no personal dictionary is used.
@@ -129,7 +129,7 @@ SUGGEST-SECONDS SUGGEST-GCS SUGGEST-GC-SECONDS); the
             (goto-char (point-min))
             (garbage-collect)
             (benchmark-run
-             (while (re-search-forward (rx (one-or-more (any alpha ?' ?-))) nil t)
+             (while (re-search-forward (rx alpha (? (* (any alpha ?' ?-)) alpha)) nil t)
                (let ((word (match-string-no-properties 0)))
                  (incf word-count)
                  (cond ((vibe-spell-check dict word) (incf correct-count))

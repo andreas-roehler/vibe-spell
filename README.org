@@ -1,0 +1,67 @@
+#+title: vibe-spell.el
+
+vibe-spell is a slop-rewrite of Hunspell/Nuspell in pure Emacs Lisp.
+It is nearly fully compatible with Hunspell and typically achieves 10%
+to 30% of the native C++ library performance.
+
+This package only supplies an spellchecking API.
+
+** Compatibility
+
+We aim to be compatible with the widely available Hunspell dictionary
+format and, within reasonable bounds, with Hunspell's behavior.  Among
+our benchmark dictionaries, while testing on a classical text of each
+language, we
+- fully agree with Hunspell on German (DE), English (US) and
+  Portuguese (BR), and
+- diverge on 0.56% of words in Korean and 0.09% of words in Hungarian.
+
+Some key discrepancies currently are:
+- We use Emacs's built-in casing logic, which, depending of your
+  configuration, may disagree with Hunspell's handling of ı (dotless
+  i) and İ in Turkic languages.
+- We reject words like STRAßE (that's all caps with a lowercase sharp
+  s inside), while Hunspell accepts it.
+- The `COMPLEXPREFIXES` feature is unsupported.
+- Phonetic suggestion are not implemented.
+
+Of the 82 dictionaries available in Debian, we can load and use 79;
+one, Central Kurdish, uses `COMPLEXPREFIXES`, and two, Bengali and
+Mongolian, seems to some malformed rules.
+
+** Benchmarks
+
+Here we provide some comparisons between Hunspell and vibe-spell.el
+running with native compilation and simple bytecode compilation.
+Times are the average per word.  The first rows exclude garbage
+collection, while "with GC" includes the time consumed by GC with its
+default settings.
+
+| CHECK     | Hunspell     | vibe-spell.el, native | vibe-spell.el, bytecode | Dictionary size (aff/dic) |
+|-----------+--------------+-----------------------+-------------------------+---------------------------|
+| en_US     | 0.59 µs (1×) | 2.6 µs (4.5×)         | 4.0 µs (6.8×)           | 50/79,013                 |
+| (with GC) |              | 4.3 µs (7.3×)         | 5.7 µs (9.6×)           |                           |
+| ko        | 4.6 µs (1×)  | 19 µs (4.1×)          | 27 µs (6.0×)            | 98,577/101,597            |
+| (with GC) |              | 28 µs (6.2×)          | 37 µs (8.1×)            |                           |
+| pt_BR     | 4.6 µs (1×)  | 34 µs (7.4×)          | 63 µs (13.6×)           | 25,829/312,368            |
+| (with GC) |              | 37 µs (8.1×)          | 66 µs (14.3×)           |                           |
+| de_DE     | 4.9 µs (1×)  | 8.9 µs (1.8×)         | 15 µs (3.1×)            | 473/75,711                |
+| (with GC) |              | 15 µs (3.0×)          | 21 µs (4.3×)            |                           |
+| hu_HU     | 10 µs (1×)   | 50 µs (4.9×)          | 81 µs (7.9×)            | 24,542/96,940             |
+| (with GC) |              | 73 µs (7.1×)          | 104 µs (10.2×)          |                           |
+
+For suggesting corrections, the gap with Hunspell is larger.  Since
+corrections are typically used in interactive context, this matters
+less for usability.
+
+| SUGGEST | Hunspell    | vibe-spell.el, native | vibe-spell.el, bytecode |
+|---------+-------------+-----------------------+-------------------------|
+| en_US   | 12 ms (1×)  | 51 ms (4.2×)          | 74 ms (6.0×)            |
+| ko      | 104 ms (1×) | 554 ms (*)            | 556 ms (*)              |
+| pt_BR   | 61 ms (1×)  | 222 ms (3.6×)         | 299 ms (4.9×)           |
+| de_DE   | 29 ms (1×)  | 188 ms (6.4×)         | 284 ms (9.7×)           |
+| hu_HU   | 8.6 ms (1×) | 155 ms (18.0×)        | 183 ms (21.3×)          |
+
+There is a 500 ms timeout (GC excluded) when computing suggestions;
+the results for Korean mean that we reach that timeout on practically
+every word.

@@ -1,4 +1,4 @@
-/* hunspell-bench.c --- apples-to-apples C benchmark for vibe-spell-bench.el
+/* hunspell-check.c --- apples-to-apples C benchmark for vibe-spell-bench.el
  *
  * Measures how long Hunspell_create() takes to load a dictionary, and
  * how long Hunspell_spell() then takes to check every word of a file,
@@ -7,8 +7,10 @@
  * before any checking is timed; words are then found and checked on
  * the fly, one at a time, rather than first collected into a list; a
  * word is a maximal run of Unicode alphabetic characters, apostrophes
- * and hyphens, decoded from the file's assumed UTF-8 encoding -- the
- * same definition `(rx (one-or-more (any alpha ?' ?-)))' uses in
+ * and hyphens, decoded from the file's assumed UTF-8 encoding, minus
+ * any leading and trailing apostrophes and hyphens (a run of nothing
+ * but those is skipped) -- the same definition
+ * `(rx alpha (? (* (any alpha ?' ?-)) alpha))' uses in
  * vibe-spell-bench.el.  Each word is converted from UTF-8 to the
  * dictionary's own declared encoding (its .aff file's SET directive,
  * read back via Hunspell_get_dic_encoding) before being checked,
@@ -21,12 +23,15 @@
  * a separately timed pass after it, as vibe-spell-bench.el does.
  * With --lines N, only the first N lines of FILE are used.
  *
- * Usage: hunspell-bench [--suggest] [--lines N] DICT-NAME FILE
+ * With --print, "good: WORD" or "bad: WORD" is also printed for each
+ * word checked; vibe-spell-compare.el uses this.
+ *
+ * Usage: hunspell-check [--suggest] [--lines N] [--print] DICT-NAME FILE
  * DICT-NAME is looked up as data/DICT-NAME.{aff,dic}, relative to the
  * current directory (the project directory, when run by make), the
  * same files vibe-spell-bench.el loads.
  *
- * Build: make .tmp/hunspell-bench, which links against a static Hunspell built
+ * Build: make .tmp/hunspell-check, which links against a static Hunspell built
  * from the hunspell/ source checkout.
  */
 
@@ -60,17 +65,26 @@ is_word_char(wchar_t wc)
  * word occurrences (in the dictionary's encoding) to suggest for. */
 struct tally {
 	long word_count, correct_count;
-	int suggest;
+	int suggest, print;
 	char **misspelled;
 	long misspelled_count, misspelled_cap;
 };
 
-/* Check WORD (WLEN bytes, UTF-8), converting it to the dictionary's
- * own encoding via CD first unless CD is (iconv_t)-1 (dictionary is
+/* Check WORD (WLEN bytes, UTF-8), minus leading and trailing
+ * apostrophes and hyphens, converting it to the dictionary's own
+ * encoding via CD first unless CD is (iconv_t)-1 (dictionary is
  * already UTF-8), and record the result in T. */
 static void
 count_word(Hunhandle *h, iconv_t cd, char *word, size_t wlen, struct tally *t)
 {
+	while (wlen > 0 && (*word == '\'' || *word == '-')) {
+		word++;
+		wlen--;
+	}
+	while (wlen > 0 && (word[wlen - 1] == '\'' || word[wlen - 1] == '-'))
+		wlen--;
+	if (wlen == 0)
+		return;
 	word[wlen] = '\0';
 	char converted[1024];
 	const char *w = word;
@@ -82,7 +96,10 @@ count_word(Hunhandle *h, iconv_t cd, char *word, size_t wlen, struct tally *t)
 		w = converted;
 	}
 	t->word_count++;
-	if (Hunspell_spell(h, w)) {
+	int good = Hunspell_spell(h, w);
+	if (t->print)
+		printf("%s: %s\n", good ? "good" : "bad", word);
+	if (good) {
 		t->correct_count++;
 	} else if (t->suggest) {
 		if (t->misspelled_count == t->misspelled_cap) {
@@ -101,18 +118,18 @@ read_file(const char *path, long *size)
 {
 	FILE *f = fopen(path, "rb");
 	if (!f) {
-		fprintf(stderr, "hunspell-bench: %s: %s\n", path, strerror(errno));
+		fprintf(stderr, "hunspell-check: %s: %s\n", path, strerror(errno));
 		exit(1);
 	}
 	if (fseek(f, 0, SEEK_END) != 0) {
-		fprintf(stderr, "hunspell-bench: %s: cannot seek\n", path);
+		fprintf(stderr, "hunspell-check: %s: cannot seek\n", path);
 		exit(1);
 	}
 	long len = ftell(f);
 	fseek(f, 0, SEEK_SET);
 	char *buf = malloc((size_t)len + 1);
 	if (!buf) {
-		fprintf(stderr, "hunspell-bench: out of memory\n");
+		fprintf(stderr, "hunspell-check: out of memory\n");
 		exit(1);
 	}
 	size_t got = fread(buf, 1, (size_t)len, f);
@@ -125,19 +142,21 @@ read_file(const char *path, long *size)
 int
 main(int argc, char **argv)
 {
-	int suggest = 0;
+	int suggest = 0, print = 0;
 	long lines = -1;
 	int argi = 1;
 	for (; argi < argc && strncmp(argv[argi], "--", 2) == 0; argi++) {
 		if (strcmp(argv[argi], "--suggest") == 0)
 			suggest = 1;
+		else if (strcmp(argv[argi], "--print") == 0)
+			print = 1;
 		else if (strcmp(argv[argi], "--lines") == 0 && argi + 1 < argc)
 			lines = atol(argv[++argi]);
 		else
 			break;
 	}
 	if (argc - argi != 2) {
-		fprintf(stderr, "usage: %s [--suggest] [--lines N] DICT-NAME FILE\n",
+		fprintf(stderr, "usage: %s [--suggest] [--lines N] [--print] DICT-NAME FILE\n",
 		        argv[0]);
 		return 1;
 	}
@@ -147,7 +166,7 @@ main(int argc, char **argv)
 	/* Unicode-aware iswalpha() needs a UTF-8 locale. */
 	if (!setlocale(LC_CTYPE, "C.UTF-8") && !setlocale(LC_CTYPE, "en_US.UTF-8")
 	    && !setlocale(LC_CTYPE, ""))
-		fprintf(stderr, "hunspell-bench: warning: no UTF-8 locale available\n");
+		fprintf(stderr, "hunspell-check: warning: no UTF-8 locale available\n");
 
 	char aff_path[4096], dic_path[4096];
 	snprintf(aff_path, sizeof aff_path, "data/%s.aff", dict_name);
@@ -157,7 +176,7 @@ main(int argc, char **argv)
 	Hunhandle *h = Hunspell_create(aff_path, dic_path);
 	double load_seconds = now() - t0;
 	if (!h) {
-		fprintf(stderr, "hunspell-bench: could not load dictionary %s\n", dict_name);
+		fprintf(stderr, "hunspell-check: could not load dictionary %s\n", dict_name);
 		return 1;
 	}
 
@@ -169,7 +188,7 @@ main(int argc, char **argv)
 	if (strcmp(dic_encoding, "UTF-8") != 0) {
 		cd = iconv_open(dic_encoding, "UTF-8");
 		if (cd == (iconv_t)-1) {
-			fprintf(stderr, "hunspell-bench: iconv_open UTF-8 -> %s: %s\n",
+			fprintf(stderr, "hunspell-check: iconv_open UTF-8 -> %s: %s\n",
 			        dic_encoding, strerror(errno));
 			return 1;
 		}
@@ -192,7 +211,7 @@ main(int argc, char **argv)
 	 * found and checked on the fly, one at a time, rather than first
 	 * collected into a list. */
 	t0 = now();
-	struct tally t = {.suggest = suggest};
+	struct tally t = {.suggest = suggest, .print = print};
 	mbstate_t mbs;
 	memset(&mbs, 0, sizeof mbs);
 	char *p = buf, *end = buf + file_size;

@@ -1,4 +1,6 @@
 .*
+!.gitignore
+!.elpaignore
 *.elc
 data/
 hunspell/
