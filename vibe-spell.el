@@ -99,8 +99,8 @@ Longer words are always reported as correct.")
 
 (defvar vibe-spell-check-time-limit 5
   "Time limit, in milliseconds, for checking a single word.
-A word whose check takes longer is reported as correct, with
-`vibe-spell-check' returning `timeout'.  If nil, there is no limit.")
+If checking a word takes longer than that, `vibe-spell-check' returns
+`timeout'.  If nil, there is no limit.")
 
 (defvar vibe-spell-suggest-time-limit 500
   "Time limit, in milliseconds, for suggesting corrections for a word.
@@ -313,10 +313,12 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;;;; Data structures
 
 (cl-defstruct (-prefix (:constructor -prefix-create))
-  flag cross-product stripping appending cont-flags condition)
+  flag cross-product stripping appending cont-flags condition
+  (bits (make-bool-vector 9 nil)))      ; see `-affix-bits'
 
 (cl-defstruct (-suffix (:constructor -suffix-create))
-  flag cross-product stripping appending cont-flags condition)
+  flag cross-product stripping appending cont-flags condition
+  (bits (make-bool-vector 9 nil)))
 
 (cl-defstruct (-similarity-group (:constructor -similarity-group-create))
   ;; One MAP entry: a set of characters/strings considered
@@ -335,6 +337,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
   (pdict nil)                          ; personal dictionary file name
   (prefix-table nil)                   ; sorted vector of (KEY . `-prefix'), KEY = appending
   (suffix-table nil)                   ; sorted vector of (KEY . `-suffix'), KEY = (reverse appending)
+  (prefix-cont-flags nil)              ; hash-table of all prefixes' cont flags, or nil if none
+  (suffix-cont-flags nil)              ; same for suffixes
   (compound-rules nil)                 ; list of patterns; pattern = list of (flag . quant)
   (compound-rules-all-flags nil)
   (break-start nil) (break-end nil) (break-middle nil)
@@ -537,34 +541,55 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 
 ;;;; Affix helpers
 
-(defun -prefix-not-valid-p (dict mode pfx)
-  (let ((cont (-prefix-cont-flags pfx)))
-    (or (and (eq mode :full-word)
-             (-flags-contain cont (-dict-compound-onlyin-flag dict)))
-        (and (eq mode :compound-end)
-             (not (-flags-contain cont (-dict-compound-permit-flag dict))))
-        (and (not (eq mode :full-word))
-             (-flags-contain cont (-dict-compound-forbid-flag dict))))))
+(defun -affix-bits (dict cont permit-mode)
+;; Return the `bits' slot value, a bool-vector, of a `-prefix' or
+;; `-suffix' whose continuation flags are CONT; PERMIT-MODE is the
+;; compounding mode in which such an affix needs COMPOUNDPERMITFLAG,
+;; :compound-end for a prefix or :compound-begin for a suffix.  These
+;; bits cache what would otherwise be several flag-list searches per
+;; candidate affix: bit I (for the Ith mode of :full-word, :compound-begin,
+;; :compound-middle, :compound-end) is set if the affix is not valid in
+;; that mode, as tested by `-prefix-not-valid-p'/`-suffix-not-valid-p';
+;; bit 4+I if it is not valid as an outer affix, as tested by
+;; `-outer-prefix-not-valid-p'/`-outer-suffix-not-valid-p'; and bit 8
+;; if it has CIRCUMFIX.  Mirrors Nuspell's `affix_NOT_valid' and
+;; `outer_affix_NOT_valid'.
+  (let ((bits (make-bool-vector 9 nil)) (i 0))
+    (dolist (mode '(:full-word :compound-begin :compound-middle :compound-end))
+      (let ((not-valid
+             (or (and (eq mode :full-word)
+                      (-flags-contain cont (-dict-compound-onlyin-flag dict)))
+                 (and (eq mode permit-mode)
+                      (not (-flags-contain cont (-dict-compound-permit-flag dict))))
+                 (and (not (eq mode :full-word))
+                      (-flags-contain cont (-dict-compound-forbid-flag dict))))))
+        (aset bits i (and not-valid t))
+        (aset bits (+ 4 i)
+              (and (or not-valid (-flags-contain cont (-dict-need-affix-flag dict))) t)))
+      (incf i))
+    (aset bits 8 (-flags-contain cont (-dict-circumfix-flag dict)))
+    bits))
 
-(defun -suffix-not-valid-p (dict mode sfx)
-  (let ((cont (-suffix-cont-flags sfx)))
-    (or (and (eq mode :full-word)
-             (-flags-contain cont (-dict-compound-onlyin-flag dict)))
-        (and (eq mode :compound-begin)
-             (not (-flags-contain cont (-dict-compound-permit-flag dict))))
-        (and (not (eq mode :full-word))
-             (-flags-contain cont (-dict-compound-forbid-flag dict))))))
+(defsubst -mode-index (mode)
+  (pcase mode (:full-word 0) (:compound-begin 1) (:compound-middle 2) (:compound-end 3)))
 
-(defun -outer-prefix-not-valid-p (dict mode pfx)
-  (or (-prefix-not-valid-p dict mode pfx)
-      (-flags-contain (-prefix-cont-flags pfx) (-dict-need-affix-flag dict))))
+(defsubst -prefix-not-valid-p (mode pfx)
+  (aref (-prefix-bits pfx) (-mode-index mode)))
 
-(defun -outer-suffix-not-valid-p (dict mode sfx)
-  (or (-suffix-not-valid-p dict mode sfx)
-      (-flags-contain (-suffix-cont-flags sfx) (-dict-need-affix-flag dict))))
+(defsubst -suffix-not-valid-p (mode sfx)
+  (aref (-suffix-bits sfx) (-mode-index mode)))
 
-(defun -circumfix-flags-p (dict cont-flags)
-  (-flags-contain cont-flags (-dict-circumfix-flag dict)))
+(defsubst -outer-prefix-not-valid-p (mode pfx)
+  (aref (-prefix-bits pfx) (+ 4 (-mode-index mode))))
+
+(defsubst -outer-suffix-not-valid-p (mode sfx)
+  (aref (-suffix-bits sfx) (+ 4 (-mode-index mode))))
+
+(defsubst -prefix-circumfix-p (pfx)
+  (aref (-prefix-bits pfx) 8))
+
+(defsubst -suffix-circumfix-p (sfx)
+  (aref (-suffix-bits sfx) 8))
 
 (defun -valid-inside-compound-p (dict mode flags)
   (cond
@@ -663,6 +688,16 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
     `(-affix-table-find ,var (-dict-suffix-table ,dict) ,word t
        ,@body)))
 
+(defsubst -has-cont-flag-p (cont-flags flag)
+;; Return non-nil if FLAG is a continuation flag of some affix, given
+;; CONT-FLAGS, the `-dict-prefix-cont-flags' or
+;; `-dict-suffix-cont-flags' table.  As in Nuspell, this is purely a
+;; shortcut: an outer affix whose flag is in no other affix's
+;; continuation flags can never take part in a two-level affixation,
+;; so the multi-affix strippers skip it before testing its condition
+;; and scanning for inner affixes.
+  (and cont-flags (hash-table-contains-p flag cont-flags)))
+
 (defun -prefix-to-root (pfx word)
   (concat (-prefix-stripping pfx)
           (substring word (length (-prefix-appending pfx)))))
@@ -753,11 +788,11 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 
 (defun -strip-suffix-only (dict mode word skip-hidden)
   (-do-suffixes-of (se dict word)
-    (and (not (or (-outer-suffix-not-valid-p dict mode se)
+    (and (not (or (-outer-suffix-not-valid-p mode se)
                   (and (eq mode :compound-end)
                        (not (string-empty-p (-suffix-appending se)))
                        (-flags-contain (-suffix-cont-flags se) (-dict-compound-onlyin-flag dict)))
-                  (-circumfix-flags-p dict (-suffix-cont-flags se))))
+                  (-suffix-circumfix-p se)))
          (-suffix-condition-matches-p se word)
          (let ((root (-suffix-to-root se word)))
            (named-let recur ((tail (-homonyms dict root)))
@@ -774,8 +809,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 
 (defun -strip-prefix-only (dict mode word skip-hidden)
   (-do-prefixes-of (pe dict word)
-    (and (not (or (-outer-prefix-not-valid-p dict mode pe)
-                  (-circumfix-flags-p dict (-prefix-cont-flags pe))))
+    (and (not (or (-outer-prefix-not-valid-p mode pe)
+                  (-prefix-circumfix-p pe)))
          (-prefix-condition-matches-p pe word)
          (let ((root (-prefix-to-root pe word)))
            (named-let recur ((tail (-homonyms dict root)))
@@ -798,7 +833,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; "commutative" variant does.
   (-do-prefixes-of (pe dict word)
     (and (-prefix-cross-product pe)
-         (not (-prefix-not-valid-p dict mode pe))
+         (not (-prefix-not-valid-p mode pe))
          (-prefix-condition-matches-p pe word)
          (let ((root1 (-prefix-to-root pe word)))
            (-strip-pfx-then-sfx-comm-2 dict mode pe root1 skip-hidden)))))
@@ -806,14 +841,14 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 (defun -strip-pfx-then-sfx-comm-2 (dict mode pe word skip-hidden)
   (let* ((pe-cont (-prefix-cont-flags pe))
          (has-needaffix-pe (-flags-contain pe-cont (-dict-need-affix-flag dict)))
-         (circumfix-pe (-circumfix-flags-p dict pe-cont)))
+         (circumfix-pe (-prefix-circumfix-p pe)))
     (-do-suffixes-of (se dict word)
       (and (-suffix-cross-product se)
-           (not (-suffix-not-valid-p dict mode se))
+           (not (-suffix-not-valid-p mode se))
            (let* ((se-cont (-suffix-cont-flags se))
                   (has-needaffix-se (-flags-contain se-cont (-dict-need-affix-flag dict))))
              (and (not (and has-needaffix-pe has-needaffix-se))
-                  (eq circumfix-pe (-circumfix-flags-p dict se-cont))
+                  (eq circumfix-pe (-suffix-circumfix-p se))
                   (-suffix-condition-matches-p se word)
                   (let ((root (-suffix-to-root se word)))
                     (named-let recur ((tail (-homonyms dict root)))
@@ -840,18 +875,21 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                             (recur (cdr tail))))))))))))
 
 (defun -strip-suffix-then-suffix (dict word skip-hidden)
-  (-do-suffixes-of (se1 dict word)
-    (and (not (or (-outer-suffix-not-valid-p dict :full-word se1)
-                  (-circumfix-flags-p dict (-suffix-cont-flags se1))))
-         (-suffix-condition-matches-p se1 word)
-         (let ((root1 (-suffix-to-root se1 word)))
-           (-strip-sfx-then-sfx-2 dict se1 root1 skip-hidden)))))
+  (and
+   (-dict-suffix-cont-flags dict)
+   (-do-suffixes-of (se1 dict word)
+     (and (-has-cont-flag-p (-dict-suffix-cont-flags dict) (-suffix-flag se1))
+          (not (or (-outer-suffix-not-valid-p :full-word se1)
+                   (-suffix-circumfix-p se1)))
+          (-suffix-condition-matches-p se1 word)
+          (let ((root1 (-suffix-to-root se1 word)))
+            (-strip-sfx-then-sfx-2 dict se1 root1 skip-hidden))))))
 
 (defun -strip-sfx-then-sfx-2 (dict se1 word skip-hidden)
   (-do-suffixes-of (se2 dict word)
     (and (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
-         (not (or (-suffix-not-valid-p dict :full-word se2)
-                  (-circumfix-flags-p dict (-suffix-cont-flags se2))))
+         (not (or (-suffix-not-valid-p :full-word se2)
+                  (-suffix-circumfix-p se2)))
          (-suffix-condition-matches-p se2 word)
          (let ((root (-suffix-to-root se2 word)))
            (named-let recur ((tail (-homonyms dict root)))
@@ -864,25 +902,28 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                    (recur (cdr tail)))))))))
 
 (defun -strip-prefix-then-2-suffixes (dict word skip-hidden)
-  (-do-prefixes-of (pe1 dict word)
-    (and (-prefix-cross-product pe1)
-         (not (-outer-prefix-not-valid-p dict :full-word pe1))
-         (-prefix-condition-matches-p pe1 word)
-         (let ((root-p (-prefix-to-root pe1 word)))
-           (-do-suffixes-of (se1 dict root-p)
-             (and (-suffix-cross-product se1)
-                  (not (-suffix-not-valid-p dict :full-word se1))
-                  (eq (-circumfix-flags-p dict (-prefix-cont-flags pe1))
-                      (-circumfix-flags-p dict (-suffix-cont-flags se1)))
-                  (-suffix-condition-matches-p se1 root-p)
-                  (let ((root1 (-suffix-to-root se1 root-p)))
-                    (-strip-pfx-2-sfx-3 dict pe1 se1 root1 skip-hidden))))))))
+  (and
+   (-dict-suffix-cont-flags dict)
+   (-do-prefixes-of (pe1 dict word)
+     (and (-prefix-cross-product pe1)
+          (not (-outer-prefix-not-valid-p :full-word pe1))
+          (-prefix-condition-matches-p pe1 word)
+          (let ((root-p (-prefix-to-root pe1 word)))
+            (-do-suffixes-of (se1 dict root-p)
+              (and (-has-cont-flag-p (-dict-suffix-cont-flags dict) (-suffix-flag se1))
+                   (-suffix-cross-product se1)
+                   (not (-suffix-not-valid-p :full-word se1))
+                   (eq (-prefix-circumfix-p pe1)
+                       (-suffix-circumfix-p se1))
+                   (-suffix-condition-matches-p se1 root-p)
+                   (let ((root1 (-suffix-to-root se1 root-p)))
+                     (-strip-pfx-2-sfx-3 dict pe1 se1 root1 skip-hidden)))))))))
 
 (defun -strip-pfx-2-sfx-3 (dict pe1 se1 word skip-hidden)
   (-do-suffixes-of (se2 dict word)
     (and (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
-         (not (or (-suffix-not-valid-p dict :full-word se2)
-                  (-circumfix-flags-p dict (-suffix-cont-flags se2))))
+         (not (or (-suffix-not-valid-p :full-word se2)
+                  (-suffix-circumfix-p se2)))
          (-suffix-condition-matches-p se2 word)
          (let ((root (-suffix-to-root se2 word)))
            (named-let recur ((tail (-homonyms dict root)))
@@ -897,27 +938,31 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                    (recur (cdr tail)))))))))
 
 (defun -strip-suffix-prefix-suffix (dict word skip-hidden)
-  (-do-suffixes-of (se1 dict word)
-    (and (-suffix-cross-product se1)
-         (not (-outer-suffix-not-valid-p dict :full-word se1))
-         (-suffix-condition-matches-p se1 word)
-         (let ((root-s (-suffix-to-root se1 word)))
-           (-do-prefixes-of (pe1 dict root-s)
-             (and (-prefix-cross-product pe1)
-                  (not (-prefix-not-valid-p dict :full-word pe1))
-                  (-prefix-condition-matches-p pe1 root-s)
-                  (let ((root1 (-prefix-to-root pe1 root-s)))
-                    (-strip-s-p-s-3 dict se1 pe1 root1 skip-hidden))))))))
+  (and
+   (or (-dict-suffix-cont-flags dict) (-dict-prefix-cont-flags dict))
+   (-do-suffixes-of (se1 dict word)
+     (and (or (-has-cont-flag-p (-dict-suffix-cont-flags dict) (-suffix-flag se1))
+              (-has-cont-flag-p (-dict-prefix-cont-flags dict) (-suffix-flag se1)))
+          (-suffix-cross-product se1)
+          (not (-outer-suffix-not-valid-p :full-word se1))
+          (-suffix-condition-matches-p se1 word)
+          (let ((root-s (-suffix-to-root se1 word)))
+            (-do-prefixes-of (pe1 dict root-s)
+              (and (-prefix-cross-product pe1)
+                   (not (-prefix-not-valid-p :full-word pe1))
+                   (-prefix-condition-matches-p pe1 root-s)
+                   (let ((root1 (-prefix-to-root pe1 root-s)))
+                     (-strip-s-p-s-3 dict se1 pe1 root1 skip-hidden)))))))))
 
 (defun -strip-s-p-s-3 (dict se1 pe1 word skip-hidden)
   (-do-suffixes-of (se2 dict word)
     (and (-suffix-cross-product se2)
          (or (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
              (-cross-valid-p (-prefix-cont-flags pe1) (-suffix-flag se1)))
-         (not (-suffix-not-valid-p dict :full-word se2))
-         (let* ((circ-pe1 (-circumfix-flags-p dict (-prefix-cont-flags pe1)))
-                (circ-se1 (-circumfix-flags-p dict (-suffix-cont-flags se1)))
-                (circ-se2 (-circumfix-flags-p dict (-suffix-cont-flags se2)))
+         (not (-suffix-not-valid-p :full-word se2))
+         (let* ((circ-pe1 (-prefix-circumfix-p pe1))
+                (circ-se1 (-suffix-circumfix-p se1))
+                (circ-se2 (-suffix-circumfix-p se2))
                 (ok1 (and (eq circ-pe1 circ-se1) (not circ-se2)))
                 (ok2 (and (eq circ-pe1 circ-se2) (not circ-se1))))
            (and (or ok1 ok2)
@@ -1517,14 +1562,14 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;;;; Attempt budget, for the algorithms below that are otherwise O(word
 ;;;; length * affix table size) or worse
 
-(cl-defstruct (-budget (:constructor -budget-create (n)))
-;; A shared, mutable count of remaining suggestion attempts.
-  n)
+;; Count of remaining suggestion attempts.  Each algorithm below that
+;; is capped by it let-binds it to `-max-attempts-for-long-algos'.
+(defvar -budget 0)
 
-(defun -budget-consume (budget)
-;; Consume one unit of BUDGET; return non-nil if one was available.
-  (when (> (-budget-n budget) 0)
-    (decf (-budget-n budget))
+(defun -budget-consume ()
+;; Consume one unit of `-budget'; return non-nil if one was available.
+  (when (plusp -budget)
+    (decf -budget)
     t))
 
 (defun -max-attempts-for-long-algos (dict word)
@@ -1644,14 +1689,14 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
          dict (concat (substring word 0 i) to (substring word (+ i (length from)))) box)
         (setq i (string-search from word (1+ i)))))))
 
-(defun -map-suggest-try (dict word box i old-len rep budget)
+(defun -map-suggest-try (dict word box i old-len rep)
 ;; Replace WORD[I, I+OLD-LEN) with REP, as one `-map-suggest' attempt.
-  (when (-budget-consume budget)
+  (when (-budget-consume)
     (let ((candidate (concat (substring word 0 i) rep (substring word (+ i old-len)))))
       (-add-sug-if-correct dict candidate box)
-      (-map-suggest-1 dict candidate box (+ i (length rep)) budget))))
+      (-map-suggest-1 dict candidate box (+ i (length rep))))))
 
-(defun -map-suggest-try-group (dict word box i budget grp)
+(defun -map-suggest-try-group (dict word box i grp)
 ;; Try GRP's character/string equivalences at WORD's position I.  See
 ;; `-map-suggest-1'.
   (let* ((chars (-similarity-group-chars grp))
@@ -1661,30 +1706,31 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
     (when j
       (dotimes (k (length chars))
         (unless (= k j)
-          (-map-suggest-try dict word box i 1 (substring chars k (1+ k)) budget)))
+          (-map-suggest-try dict word box i 1 (substring chars k (1+ k)))))
       (dolist (r strings)
-        (-map-suggest-try dict word box i 1 r budget)))
+        (-map-suggest-try dict word box i 1 r)))
     (dolist (f strings)
       (when (and (<= (+ i (length f)) (length word))
                  (string= f (substring word i (+ i (length f)))))
         (dotimes (k (length chars))
-          (-map-suggest-try dict word box i (length f) (substring chars k (1+ k)) budget))
+          (-map-suggest-try dict word box i (length f) (substring chars k (1+ k))))
         (dolist (r strings)
           (unless (string= r f)
-            (-map-suggest-try dict word box i (length f) r budget)))))))
+            (-map-suggest-try dict word box i (length f) r)))))))
 
-(defun -map-suggest-1 (dict word box i budget)
+(defun -map-suggest-1 (dict word box i)
 ;; Try MAP (similarity-group) substitutions in WORD from index I
 ;; onward.
-  (when (and (< i (length word)) (> (-budget-n budget) 0))
+  (when (and (< i (length word)) (plusp -budget))
     (dolist (grp (-dict-similarities dict))
-      (-map-suggest-try-group dict word box i budget grp))
-    (-map-suggest-1 dict word box (1+ i) budget)))
+      (-map-suggest-try-group dict word box i grp))
+    (-map-suggest-1 dict word box (1+ i))))
 
 (defun -map-suggest (dict word box)
 ;; Try DICT's MAP character/string equivalences throughout WORD.
 ;; Mirrors Nuspell's `Suggester::map_suggest'.
-  (-map-suggest-1 dict word box 0 (-budget-create (-max-attempts-for-long-algos dict word))))
+  (let ((-budget (-max-attempts-for-long-algos dict word)))
+    (-map-suggest-1 dict word box 0)))
 
 (defun -adjacent-swap-suggest (dict word box)
 ;; Try swapping each pair of adjacent characters of WORD.  For 4- and
@@ -1705,10 +1751,10 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; Nuspell's `Suggester::distant_swap_suggest'.
   (let ((len (length word)))
     (when (> len 0)
-      (let ((budget (-budget-create (-max-attempts-for-long-algos dict word))))
+      (let ((-budget (-max-attempts-for-long-algos dict word)))
         (dotimes (i len)
           (dotimes (k (max 0 (- len i 2)))
-            (when (-budget-consume budget)
+            (when (-budget-consume)
               (-add-sug-if-correct dict (-swap-chars word i (+ i 2 k)) box))))))))
 
 (defun -keyboard-suggest (dict word box)
@@ -1740,12 +1786,12 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 (defun -forgotten-char-suggest (dict word box)
 ;; Try inserting each of DICT's TRY characters at each position of
 ;; WORD.  Mirrors Nuspell's `Suggester::forgotten_char_suggest'.
-  (let ((budget (-budget-create (-max-attempts-for-long-algos dict word)))
+  (let ((-budget (-max-attempts-for-long-algos dict word))
         (try-chars (-dict-try-chars dict)))
     (dotimes (t-idx (length try-chars))
       (let ((cp (substring try-chars t-idx (1+ t-idx))))
         (dotimes (i (1+ (length word)))
-          (when (-budget-consume budget)
+          (when (-budget-consume)
             (-add-sug-if-correct
              dict (concat (substring word 0 i) cp (substring word i)) box)))))))
 
@@ -1753,26 +1799,26 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; Try moving each character of WORD to each other, non-adjacent
 ;; position.  Mirrors Nuspell's `Suggester::move_char_suggest'.
   (let* ((len (length word))
-         (budget (-budget-create (-max-attempts-for-long-algos dict word))))
+         (-budget (-max-attempts-for-long-algos dict word)))
     (dotimes (i1 len)
       (dotimes (k (max 0 (- len i1 2)))
-        (when (-budget-consume budget)
+        (when (-budget-consume)
           (-add-sug-if-correct dict (-move-char-forward word i1 (+ i1 2 k)) box))))
     (dotimes (i1 len)
       (dotimes (k (max 0 (- i1 2)))
-        (when (-budget-consume budget)
+        (when (-budget-consume)
           (-add-sug-if-correct dict (-move-char-backward word i1 (- i1 2 k)) box))))))
 
 (defun -bad-char-suggest (dict word box)
 ;; Try replacing each character of WORD with each of DICT's TRY
 ;; characters.  Mirrors Nuspell's `Suggester::bad_char_suggest'.
-  (let ((budget (-budget-create (-max-attempts-for-long-algos dict word)))
+  (let ((-budget (-max-attempts-for-long-algos dict word))
         (try-chars (-dict-try-chars dict)))
     (dotimes (t-idx (length try-chars))
       (let ((tc (aref try-chars t-idx)))
         (dotimes (i (length word))
           (unless (eq (aref word i) tc)
-            (when (-budget-consume budget)
+            (when (-budget-consume)
               (-add-sug-if-correct dict (-replace-char-at word i (string tc)) box))))))))
 
 (defun -doubled-two-chars-suggest (dict word box)
@@ -1978,8 +2024,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
     (when flags
       (dolist (sfx (-all-affix-table-entries (-dict-suffix-table dict)))
         (when (and (-cross-valid-p flags (-suffix-flag sfx))
-                   (not (-outer-suffix-not-valid-p dict :full-word sfx))
-                   (not (-circumfix-flags-p dict (-suffix-cont-flags sfx)))
+                   (not (-outer-suffix-not-valid-p :full-word sfx))
+                   (not (-suffix-circumfix-p sfx))
                    (string-suffix-p (-suffix-stripping sfx) root)
                    (-suffix-check-condition sfx root)
                    (or (string-empty-p (-suffix-appending sfx))
@@ -1992,8 +2038,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
          (when ok
            (dolist (pfx (-all-affix-table-entries (-dict-prefix-table dict)))
              (when (and (-cross-valid-p flags (-prefix-flag pfx))
-                        (not (-outer-prefix-not-valid-p dict :full-word pfx))
-                        (not (-circumfix-flags-p dict (-prefix-cont-flags pfx)))
+                        (not (-outer-prefix-not-valid-p :full-word pfx))
+                        (not (-prefix-circumfix-p pfx))
                         (string-prefix-p (-prefix-stripping pfx) root-sfx)
                         (-prefix-check-condition pfx root-sfx)
                         (or (string-empty-p (-prefix-appending pfx))
@@ -2002,8 +2048,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
        suffixed cross-ok)
       (dolist (pfx (-all-affix-table-entries (-dict-prefix-table dict)))
         (when (and (-cross-valid-p flags (-prefix-flag pfx))
-                   (not (-outer-prefix-not-valid-p dict :full-word pfx))
-                   (not (-circumfix-flags-p dict (-prefix-cont-flags pfx)))
+                   (not (-outer-prefix-not-valid-p :full-word pfx))
+                   (not (-prefix-circumfix-p pfx))
                    (string-prefix-p (-prefix-stripping pfx) root)
                    (-prefix-check-condition pfx root)
                    (or (string-empty-p (-prefix-appending pfx))
@@ -2843,14 +2889,28 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
       ;; As in Nuspell, ignored characters are erased from each affix's
       ;; appended text (but not from its stripped text) once parsing is
       ;; done, since IGNORE may appear anywhere relative to PFX/SFX.
+      ;; Likewise for the validity bits, which depend on directives
+      ;; such as NEEDAFFIX and CIRCUMFIX.
       (dolist (p prefixes)
-        (setf (-prefix-appending p) (-erase-chars (-prefix-appending p) (-dict-ignored-chars dict))))
+        (setf (-prefix-appending p) (-erase-chars (-prefix-appending p) (-dict-ignored-chars dict)))
+        (setf (-prefix-bits p) (-affix-bits dict (-prefix-cont-flags p) :compound-end)))
       (dolist (s suffixes)
-        (setf (-suffix-appending s) (-erase-chars (-suffix-appending s) (-dict-ignored-chars dict))))
+        (setf (-suffix-appending s) (-erase-chars (-suffix-appending s) (-dict-ignored-chars dict)))
+        (setf (-suffix-bits s) (-affix-bits dict (-suffix-cont-flags s) :compound-begin)))
       (setf (-dict-prefix-table dict)
             (-build-affix-table prefixes #'-prefix-appending))
       (setf (-dict-suffix-table dict)
             (-build-affix-table suffixes (lambda (s) (reverse (-suffix-appending s)))))
+      (setf (-dict-prefix-cont-flags dict)
+            (let ((table (make-hash-table)))
+              (dolist (p prefixes)
+                (dolist (flag (-prefix-cont-flags p)) (puthash flag t table)))
+              (unless (zerop (hash-table-count table)) table)))
+      (setf (-dict-suffix-cont-flags dict)
+            (let ((table (make-hash-table)))
+              (dolist (s suffixes)
+                (dolist (flag (-suffix-cont-flags s)) (puthash flag t table)))
+              (unless (zerop (hash-table-count table)) table)))
       (unless break-seen (setq break-patterns '("^-" "-$" "-")))
       (let ((parts (-partition-break-patterns break-patterns)))
         (setf (-dict-break-start dict) (nth 0 parts))
