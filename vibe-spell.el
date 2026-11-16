@@ -45,6 +45,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'compat)
 
 (defgroup vibe-spell nil
   "Hunspell-compatible spell checking library in pure Emacs Lisp."
@@ -97,15 +98,19 @@ Donaudampfschiffahrtselektrizitätenhauptbetriebswerkbauunterbeamtengesellschaft
   "Maximum word length to be processed by the spell checker.
 Longer words are always reported as correct.")
 
-(defvar vibe-spell-check-time-limit 5
+(defcustom vibe-spell-check-time-limit 5
   "Time limit, in milliseconds, for checking a single word.
 If checking a word takes longer than that, `vibe-spell-check' returns
-`timeout'.  If nil, there is no limit.")
+`timeout'.  If nil, there is no limit."
+  :type '(choice (natnum :tag "Milliseconds")
+                 (const :tag "No limit" nil)))
 
-(defvar vibe-spell-suggest-time-limit 500
+(defcustom vibe-spell-suggest-time-limit 500
   "Time limit, in milliseconds, for suggesting corrections for a word.
 When it is exceeded, the suggestions found so far are returned.  If
-nil, there is no limit.")
+nil, there is no limit."
+  :type '(choice (natnum :tag "Milliseconds")
+                 (const :tag "No limit" nil)))
 
 ;; Time limit of the current operation, or nil.  This is a cons
 ;; (DEADLINE . GC-ELAPSED): the value that `car' of `current-time' may
@@ -149,7 +154,8 @@ These are the names you can pass to `vibe-spell-create'."
             (when (and (file-readable-p aff)
                        (file-readable-p (concat base ".dic")))
               (push (file-name-nondirectory base) names))))))
-    (sort (delete-dups names) :in-place t)))
+    ;; For Emacs ≤29
+    (compat-call sort (delete-dups names) :in-place t)))
 
 (defun vibe-spell-check (dict word)
   "Return non-nil if WORD is spelled correctly according to DICT.
@@ -313,77 +319,102 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;;;; Data structures
 
 (cl-defstruct (-prefix (:constructor -prefix-create))
-  flag cross-product stripping appending cont-flags condition
-  (bits (make-bool-vector 9 nil)))      ; see `-affix-bits'
+  ;; One PFX entry.  Flags are fixnums, see `-decode-flags'.
+  (flag 0 :type fixnum)
+  (cross-product nil :type boolean)
+  (stripping "" :type string)
+  (appending "" :type string)
+  (cont-flags nil :type list)          ; list of flags
+  (condition nil :type list)           ; see `-compile-condition'
+  (bits (make-bool-vector 9 nil) :type bool-vector)) ; see `-affix-bits'
 
 (cl-defstruct (-suffix (:constructor -suffix-create))
-  flag cross-product stripping appending cont-flags condition
-  (bits (make-bool-vector 9 nil)))
+  ;; One SFX entry; slots as in `-prefix'.
+  (flag 0 :type fixnum)
+  (cross-product nil :type boolean)
+  (stripping "" :type string)
+  (appending "" :type string)
+  (cont-flags nil :type list)
+  (condition nil :type list)
+  (bits (make-bool-vector 9 nil) :type bool-vector))
 
 (cl-defstruct (-similarity-group (:constructor -similarity-group-create))
   ;; One MAP entry: a set of characters/strings considered
   ;; interchangeable.
-  (chars "") (strings nil))
+  (chars "" :type string)
+  (strings nil :type list))            ; list of strings
 
 (cl-defstruct (-compound-pattern (:constructor -compound-pattern-create))
   ;; One CHECKCOMPOUNDPATTERN entry.  TEXT is the first word's ending
   ;; followed by the second word's beginning, and IDX the length of
   ;; the former, so that the join is at IDX.  REPLACEMENT, if non-nil,
   ;; is how TEXT is written at the join instead.
-  text idx replacement (first-flag 0) (second-flag 0) first-unmodified)
+  (text "" :type string)
+  (idx 0 :type natnum)
+  (replacement nil :type (or null string))
+  (first-flag 0 :type fixnum)          ; 0 means none
+  (second-flag 0 :type fixnum)
+  (first-unmodified nil :type boolean))
 
 (cl-defstruct (-dict (:constructor -dict-create))
-  (words nil)                          ; hash-table: word -> (LOWERCASED . list of flag lists)
-  (pdict nil)                          ; personal dictionary file name
-  (prefix-table nil)                   ; sorted vector of (KEY . `-prefix'), KEY = appending
-  (suffix-table nil)                   ; sorted vector of (KEY . `-suffix'), KEY = (reverse appending)
-  (prefix-cont-flags nil)              ; hash-table of all prefixes' cont flags, or nil if none
-  (suffix-cont-flags nil)              ; same for suffixes
-  (compound-rules nil)                 ; list of patterns; pattern = list of (flag . quant)
-  (compound-rules-all-flags nil)
-  (break-start nil) (break-end nil) (break-middle nil)
-  (flag-aliases nil)                   ; vector of flag lists, alias N at index N-1
-  (flag-type 'single-char)
-  (coding 'undecided)                  ; coding system of the .aff/.dic files
-  (ignored-chars "")
-  (word-regexp nil)                    ; see `vibe-spell-word-regexp'
-  (complex-prefixes nil)
-  (fullstrip nil)
-  (checksharps nil)
-  (forbid-warn nil)
-  (compound-onlyin-flag 0)
-  (circumfix-flag 0)
-  (forbiddenword-flag 0)
-  (keepcase-flag 0)
-  (need-affix-flag 0)
-  (warn-flag 0)
-  (compound-flag 0)
-  (compound-begin-flag 0)
-  (compound-last-flag 0)
-  (compound-middle-flag 0)
-  (compound-min-length 0)
-  (compound-max-word-count 0)
-  (compound-permit-flag 0)
-  (compound-forbid-flag 0)
-  (compound-root-flag 0)
-  (compound-force-uppercase 0)
-  (compound-check-duplicate nil)
-  (compound-check-case nil)
-  (compound-check-triple nil)
-  (compound-check-rep nil)
-  (compound-patterns nil)              ; list of `-compound-pattern'
+  ;; A loaded dictionary.  Flags are fixnums, see `-decode-flags'; a
+  ;; flag slot holding 0 means the directive is absent.
+  (words nil :type (or null hash-table)) ; word -> (LOWERCASED      . list of flag lists)
+  (pdict nil :type (or null string))   ; personal dictionary file name
+  (prefix-table nil :type (or null vector)) ; sorted vector of (KEY . `-prefix'), KEY = appending
+  (suffix-table nil :type (or null vector)) ; sorted vector of (KEY . `-suffix'), KEY = (reverse appending)
+  (prefix-cont-flags nil :type (or null hash-table)) ; all prefixes' cont flags, or nil if none
+  (suffix-cont-flags nil :type (or null hash-table)) ; same for suffixes
+  (compound-rules nil :type list)      ; list of patterns; pattern = list of (FLAG . QUANT)
+  (compound-rules-all-flags nil :type list) ; list of flags
+  (break-start nil :type list)         ; lists of strings, see `-partition-break-patterns'
+  (break-end nil :type list)
+  (break-middle nil :type list)
+  (flag-aliases nil :type (or null vector)) ; vector of flag lists, alias N at index N-1; may be empty
+  (flag-type 'single-char :type (member single-char utf-8 long num))
+  (coding 'undecided :type symbol)     ; coding system of the       . aff/.dic files
+  (ignored-chars "" :type string)
+  (word-regexp nil :type (or null string)) ; see `vibe-spell-word-regexp'
+  (complex-prefixes nil :type boolean)
+  (fullstrip nil :type boolean)
+  (checksharps nil :type boolean)
+  (forbid-warn nil :type boolean)
+  (compound-onlyin-flag 0 :type fixnum)
+  (circumfix-flag 0 :type fixnum)
+  (forbiddenword-flag 0 :type fixnum)
+  (keepcase-flag 0 :type fixnum)
+  (need-affix-flag 0 :type fixnum)
+  (warn-flag 0 :type fixnum)
+  (compound-flag 0 :type fixnum)
+  (compound-begin-flag 0 :type fixnum)
+  (compound-last-flag 0 :type fixnum)
+  (compound-middle-flag 0 :type fixnum)
+  (compound-min-length 0 :type natnum)
+  (compound-max-word-count 0 :type natnum)
+  (compound-permit-flag 0 :type fixnum)
+  (compound-forbid-flag 0 :type fixnum)
+  (compound-root-flag 0 :type fixnum)
+  (compound-force-uppercase 0 :type fixnum)
+  (compound-check-duplicate nil :type boolean)
+  (compound-check-case nil :type boolean)
+  (compound-check-triple nil :type boolean)
+  (compound-check-rep nil :type boolean)
+  (compound-patterns nil :type list)   ; list of `-compound-pattern'
   ;; suggestion options
-  (try-chars "")
-  (keyboard-closeness "")
-  (rep-whole nil) (rep-start nil) (rep-end nil) (rep-any nil)
-  (similarities nil)                   ; list of `-similarity-group'
-  (input-iconv nil)                    ; see `-build-substr-replacer'
-  (output-oconv nil)
-  (nosuggest-flag 0)
-  (max-ngram-suggestions 4)
-  (max-diff-factor 5)
-  (only-max-diff nil)
-  (ngram-candidates nil))              ; cache, see `-ngram-candidates'
+  (try-chars "" :type string)
+  (keyboard-closeness "" :type string)
+  (rep-whole nil :type list)           ; lists of (FROM             . TO), see `-build-replacement-table'
+  (rep-start nil :type list)
+  (rep-end nil :type list)
+  (rep-any nil :type list)
+  (similarities nil :type list)        ; list of `-similarity-group'
+  (input-iconv nil :type (or null hash-table)) ; see `-build-substr-replacer'
+  (output-oconv nil :type (or null hash-table))
+  (nosuggest-flag 0 :type fixnum)
+  (max-ngram-suggestions 4 :type natnum)
+  (max-diff-factor 5 :type natnum)
+  (only-max-diff nil :type boolean)
+  (ngram-candidates nil :type (or null vector))) ; cache, see `-ngram-candidates'
 
 (defsubst -homonyms (dict word)
 ;; Return the list of flag lists of WORD's homonym entries in DICT.
@@ -430,7 +461,9 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 (defun -decode-flags-possible-alias (dict str)
 ;; Decode a .dic word's flags field STR, honoring flag aliases.
   (let ((aliases (-dict-flag-aliases dict)))
-    (if (zerop (length aliases))
+    ;; ALIASES is nil before any AF line, and an empty vector after
+    ;; parsing an .aff file without them.
+    (if (length= aliases 0)
         (-decode-flags dict str)
       (let ((idx (string-to-number str)))
         (if (and (> idx 0) (<= idx (length aliases)))
@@ -512,32 +545,28 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
    ((integerp spec) (eq spec ch))
    ((consp spec)
     (let ((negated (car spec)) (chars (cdr spec)))
-      (if negated (not (cl-position ch chars)) (and (cl-position ch chars) t))))))
+      (xor negated (cl-position ch chars))))))
+
+(defun -condition-match-at (specs word start)
+;; Return non-nil if SPECS match the characters of WORD from START on.
+;; WORD must have at least (length SPECS) characters from START.
+  (named-let recur ((specs specs) (idx start))
+    (or (null specs)
+        (and (-condition-match-spec (car specs) (aref word idx))
+             (recur (cdr specs) (1+ idx))))))
 
 (defun -condition-match-prefix (specs word)
 ;; Return non-nil if WORD's first (length SPECS) characters match
 ;; SPECS.
-  (let ((n (length specs)))
-    (and (>= (length word) n)
-         (let ((idx 0) (ok t))
-           (dolist (spec specs)
-             (unless (-condition-match-spec spec (aref word idx))
-               (setq ok nil))
-             (setq idx (1+ idx)))
-           ok))))
+  (and (>= (length word) (length specs))
+       (-condition-match-at specs word 0)))
 
 (defun -condition-match-suffix (specs word)
 ;; Return non-nil if WORD's last (length SPECS) characters match
 ;; SPECS.
-  (let* ((n (length specs))
-         (wlen (length word)))
-    (and (>= wlen n)
-         (let ((idx (- wlen n)) (ok t))
-           (dolist (spec specs)
-             (unless (-condition-match-spec spec (aref word idx))
-               (setq ok nil))
-             (setq idx (1+ idx)))
-           ok))))
+  (let ((start (- (length word) (length specs))))
+    (and (>= start 0)
+         (-condition-match-at specs word start))))
 
 ;;;; Affix helpers
 
@@ -666,7 +695,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; Return the `-prefix'/`-suffix' entries of affix TABLE as a plain
 ;; list.  Unlike `-affix-table-find', this does not filter by any
 ;; probe word.
-  (mapcar #'cdr (append table nil)))
+  (mapcar #'cdr table))
 
 (defmacro -do-prefixes-of (spec &rest body)
 ;; Iterate over the `-prefix' entries of DICT whose text
@@ -737,15 +766,14 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
          (strip-len (length stripping))
          (app-len (length (-prefix-appending pfx))))
     (and (>= (+ strip-len (- (length word) app-len)) n)
-         (let ((idx 0))
-           (while (and specs
-                       (-condition-match-spec
-                        (car specs)
-                        (if (< idx strip-len)
-                            (aref stripping idx)
-                          (aref word (+ app-len (- idx strip-len))))))
-             (setq specs (cdr specs) idx (1+ idx)))
-           (null specs)))))
+         (named-let recur ((specs specs) (idx 0))
+           (or (null specs)
+               (and (-condition-match-spec
+                     (car specs)
+                     (if (< idx strip-len)
+                         (aref stripping idx)
+                       (aref word (+ app-len (- idx strip-len)))))
+                    (recur (cdr specs) (1+ idx))))))))
 
 (defun -suffix-condition-matches-p (sfx word)
 ;; Like (-suffix-check-condition SFX (-suffix-to-root SFX WORD)), but
@@ -760,15 +788,14 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
          (rootlen (+ (- wordlen app-len) strip-len))
          (boundary (- rootlen strip-len)))
     (and (>= rootlen n)
-         (let ((idx (- rootlen n)))
-           (while (and specs
-                       (-condition-match-spec
-                        (car specs)
-                        (if (>= idx boundary)
-                            (aref stripping (- idx boundary))
-                          (aref word idx))))
-             (setq specs (cdr specs) idx (1+ idx)))
-           (null specs)))))
+         (named-let recur ((specs specs) (idx (- rootlen n)))
+           (or (null specs)
+               (and (-condition-match-spec
+                     (car specs)
+                     (if (>= idx boundary)
+                         (aref stripping (- idx boundary))
+                       (aref word idx)))
+                    (recur (cdr specs) (1+ idx))))))))
 
 ;;;; Affix stripping
 ;;
@@ -785,8 +812,30 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; :compound-end, mirroring Nuspell's `Affixing_Mode'.  The 2- and
 ;; 3-affix combinations below are only ever used at :full-word (see
 ;; `-check-simple-word'), matching Nuspell's own usage.
+;;
+;; The other common arguments: DICT is the `-dict' to look roots up
+;; in; WORD is the string to analyze; SKIP-HIDDEN non-nil means to
+;; ignore hidden homonym entries (see `-hidden-homonym-p').
+;;
+;; Terminology: of two affixes, the "outer" one is the one added last
+;; when deriving the word, hence the first one stripped, and the
+;; "inner" one is closer to the root.  An affix may only be added on
+;; top of a root or inner affix whose flags (the root's flags, or the
+;; inner affix's continuation flags) contain the affix's own flag;
+;; that is what the `-cross-valid-p' tests check.
+;;
+;; The multi-affix strippers are each split into an entry point, which
+;; strips the outer affix (or two) and checks it can be stripped at
+;; all, and a helper, which receives the intermediate WORD left over
+;; along with the affix objects stripped so far, strips the last affix
+;; and looks the result up.  The helper names are those of Nuspell
+;; (`strip_pfx_then_sfx_comm_2' and so on), whose trailing digit is
+;; the number of the affix the helper strips.
 
 (defun -strip-suffix-only (dict mode word skip-hidden)
+;; Analyze WORD as ROOT+SUFFIX, where ROOT is a dictionary entry whose
+;; flags contain SUFFIX's flag.  In compound MODEs, either the root or
+;; the suffix must carry the flag for that compound position.
   (-do-suffixes-of (se dict word)
     (and (not (or (-outer-suffix-not-valid-p mode se)
                   (and (eq mode :compound-end)
@@ -808,6 +857,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                    (recur (cdr tail)))))))))
 
 (defun -strip-prefix-only (dict mode word skip-hidden)
+;; Analyze WORD as PREFIX+ROOT; the mirror image of
+;; `-strip-suffix-only'.
   (-do-prefixes-of (pe dict word)
     (and (not (or (-outer-prefix-not-valid-p mode pe)
                   (-prefix-circumfix-p pe)))
@@ -830,7 +881,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; formed as prefix+root+suffix can have been built by adding either
 ;; affix first, as long as the other one's flag allows cross-product
 ;; with it; this checks both directions at once, as Nuspell's
-;; "commutative" variant does.
+;; "commutative" variant does.  This strips the prefix and lets
+;; `-strip-pfx-then-sfx-comm-2' do the rest.
   (-do-prefixes-of (pe dict word)
     (and (-prefix-cross-product pe)
          (not (-prefix-not-valid-p mode pe))
@@ -839,6 +891,16 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
            (-strip-pfx-then-sfx-comm-2 dict mode pe root1 skip-hidden)))))
 
 (defun -strip-pfx-then-sfx-comm-2 (dict mode pe word skip-hidden)
+;; Second step of `-strip-prefix-then-suffix-commutative': WORD is the
+;; original word with prefix PE already stripped.  Find a suffix SE
+;; such that WORD is ROOT+SE for a dictionary entry ROOT, and the
+;; derivation PE+ROOT+SE is valid with either affix as the outer one:
+;;  - PE outer: ROOT allows SE, and SE's continuation flags or ROOT
+;;    allow PE;
+;;  - SE outer: ROOT allows PE, and PE's continuation flags or ROOT
+;;    allow SE.
+;; An affix with NEEDAFFIX can't be outer, and both can't have it.
+;; PE and SE must agree on CIRCUMFIX: both or neither.
   (let* ((pe-cont (-prefix-cont-flags pe))
          (has-needaffix-pe (-flags-contain pe-cont (-dict-need-affix-flag dict)))
          (circumfix-pe (-prefix-circumfix-p pe)))
@@ -875,6 +937,10 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                             (recur (cdr tail))))))))))))
 
 (defun -strip-suffix-then-suffix (dict word skip-hidden)
+;; Analyze WORD as ROOT+SE2+SE1, two suffixes with SE1 outer.  This
+;; strips SE1 and lets `-strip-sfx-then-sfx-2' do the rest.  Only a
+;; suffix whose flag is among some suffix's continuation flags can be
+;; SE1.
   (and
    (-dict-suffix-cont-flags dict)
    (-do-suffixes-of (se1 dict word)
@@ -886,6 +952,10 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
             (-strip-sfx-then-sfx-2 dict se1 root1 skip-hidden))))))
 
 (defun -strip-sfx-then-sfx-2 (dict se1 word skip-hidden)
+;; Second step of `-strip-suffix-then-suffix': WORD is the original
+;; word with outer suffix SE1 already stripped.  Find an inner suffix
+;; SE2 allowing SE1, such that WORD is ROOT+SE2 for a dictionary entry
+;; ROOT allowing SE2.
   (-do-suffixes-of (se2 dict word)
     (and (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
          (not (or (-suffix-not-valid-p :full-word se2)
@@ -902,6 +972,9 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                    (recur (cdr tail)))))))))
 
 (defun -strip-prefix-then-2-suffixes (dict word skip-hidden)
+;; Analyze WORD as PE1+ROOT+SE2+SE1, with suffix SE2 inner to SE1.
+;; This strips PE1 and then SE1, which must agree on CIRCUMFIX, and
+;; lets `-strip-pfx-2-sfx-3' do the rest.
   (and
    (-dict-suffix-cont-flags dict)
    (-do-prefixes-of (pe1 dict word)
@@ -920,6 +993,11 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                      (-strip-pfx-2-sfx-3 dict pe1 se1 root1 skip-hidden)))))))))
 
 (defun -strip-pfx-2-sfx-3 (dict pe1 se1 word skip-hidden)
+;; Last step of `-strip-prefix-then-2-suffixes': WORD is the original
+;; word with prefix PE1 and outer suffix SE1 already stripped.  Find
+;; an inner suffix SE2 allowing SE1, such that WORD is ROOT+SE2 for a
+;; dictionary entry ROOT allowing SE2, and with PE1 allowed by either
+;; SE1's continuation flags or ROOT.
   (-do-suffixes-of (se2 dict word)
     (and (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
          (not (or (-suffix-not-valid-p :full-word se2)
@@ -938,6 +1016,10 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                    (recur (cdr tail)))))))))
 
 (defun -strip-suffix-prefix-suffix (dict word skip-hidden)
+;; Analyze WORD as PE1+ROOT+SE2+SE1, where SE1 is outermost, but
+;; unlike `-strip-prefix-then-2-suffixes', SE1 may have been added on
+;; top of PE1 instead of SE2.  This strips SE1 and then PE1, and lets
+;; `-strip-s-p-s-3' do the rest.
   (and
    (or (-dict-suffix-cont-flags dict) (-dict-prefix-cont-flags dict))
    (-do-suffixes-of (se1 dict word)
@@ -955,6 +1037,13 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                      (-strip-s-p-s-3 dict se1 pe1 root1 skip-hidden)))))))))
 
 (defun -strip-s-p-s-3 (dict se1 pe1 word skip-hidden)
+;; Last step of `-strip-suffix-prefix-suffix': WORD is the original
+;; word with outer suffix SE1 and prefix PE1 already stripped.  Find a
+;; suffix SE2 such that WORD is ROOT+SE2 for a dictionary entry ROOT
+;; allowing SE2, with SE1 allowed by either SE2's or PE1's
+;; continuation flags, and PE1 by either SE2's continuation flags or
+;; ROOT.  For CIRCUMFIX, PE1 must agree with one of the suffixes and
+;; the other one must not have it.
   (-do-suffixes-of (se2 dict word)
     (and (-suffix-cross-product se2)
          (or (-cross-valid-p (-suffix-cont-flags se2) (-suffix-flag se1))
@@ -1245,23 +1334,19 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; Match flag lists DATA (one per word part) against a compound-rule
 ;; PATTERN.  PATTERN is a list of (FLAG . QUANT), QUANT one of nil, ??
 ;; or ?*.
-  (cond
-   ((null pattern) (null data))
-   (t
-    (let* ((node (car pattern)) (flag (car node)) (quant (cdr node))
-           (rest-pat (cdr pattern)))
-      (cond
-       ((eq quant ??)
-        (or (-match-compound-rule-1 data rest-pat)
-            (and data (-flags-contain (car data) flag)
-                 (-match-compound-rule-1 (cdr data) rest-pat))))
-       ((eq quant ?*)
-        (or (-match-compound-rule-1 data rest-pat)
-            (and data (-flags-contain (car data) flag)
-                 (-match-compound-rule-1 (cdr data) pattern))))
-       (t
-        (and data (-flags-contain (car data) flag)
-             (-match-compound-rule-1 (cdr data) rest-pat))))))))
+  (pcase pattern
+    ('nil (null data))
+    (`((,flag . ,??) . ,rest-pat)
+     (or (-match-compound-rule-1 data rest-pat)
+         (and data (-flags-contain (car data) flag)
+              (-match-compound-rule-1 (cdr data) rest-pat))))
+    (`((,flag . ,?*) . ,rest-pat)
+     (or (-match-compound-rule-1 data rest-pat)
+         (and data (-flags-contain (car data) flag)
+              (-match-compound-rule-1 (cdr data) pattern))))
+    (`((,flag . ,_) . ,rest-pat)
+     (and data (-flags-contain (car data) flag)
+          (-match-compound-rule-1 (cdr data) rest-pat)))))
 
 (defun -match-compound-rules (dict words-data)
   (any (lambda (pattern) (-match-compound-rule-1 words-data pattern))
@@ -1318,9 +1403,18 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;;;; Casing
 
 (defun -to-title (s)
+;; Return S with its first character title-cased and the rest
+;; downcased, e.g. "o'NEIL" -> "O'neil".  S is treated as a single word, unlike
+;; `capitalize' and `upcase-initials', which would give "O'Neil".
+;; This mirrors Nuspell's `to_title', i.e. ICU's toTitle with
+;; U_TITLECASE_WHOLE_STRING, used to try the dictionary's own
+;; capitalization of a word seen in all caps or with an initial
+;; capital.  Title-casing the first character via `capitalize',
+;; rather than `upcase', matters for some characters: ǆ gives ǅ (not
+;; Ǆ) and ß gives Ss (not SS).
   (if (string-empty-p s)
       s
-    (concat (upcase (substring s 0 1)) (downcase (substring s 1)))))
+    (concat (capitalize (substring s 0 1)) (downcase (substring s 1)))))
 
 (defun -classify-casing (s)
 ;; Classify S as `small', `init-capital', `all-capital', `pascal' or
@@ -1378,18 +1472,17 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                (-spell-sharps dict (-to-title s))))
       (let* ((s2 (-to-title s))
              (res (-check-word dict s2 t)))
-        (and res (not (-flags-contain (cdr res) (-dict-keepcase-flag dict))) res))
+        (unless (-flags-contain (cdr res) (-dict-keepcase-flag dict)) res))
       (let* ((s2 (downcase s))
              (res (-check-word dict s2 t)))
-        (and res (not (-flags-contain (cdr res) (-dict-keepcase-flag dict))) res))))
+        (unless (-flags-contain (cdr res) (-dict-keepcase-flag dict)) res))))
 
 (defun -spell-casing-title (dict s)
   (or (-check-word dict s t t)
       (let* ((s2 (downcase s))
              (res (-check-word dict s2 t)))
-        (if (and res (-flags-contain (cdr res) (-dict-keepcase-flag dict))
-                 (not (and (-dict-checksharps dict) (string-search "ß" s2))))
-            nil
+        (unless (and (-flags-contain (cdr res) (-dict-keepcase-flag dict))
+                     (not (and (-dict-checksharps dict) (string-search "ß" s2))))
           res))))
 
 (defun -spell-sharps (dict base &optional pos n rep)
@@ -1414,6 +1507,10 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
           (not (or (-flags-contain flags (-dict-forbiddenword-flag dict))
                    (and (-dict-forbid-warn dict)
                         (-flags-contain flags (-dict-warn-flag dict))))))
+      ;; Give up after 9 nested BREAK splits.  This is the same limit
+      ;; as Nuspell's `Checker::spell_break', where it is a bare
+      ;; literal; Hunspell's MAXBREAKDEPTH is 10.  It bounds the
+      ;; recursion, which may otherwise branch for every pattern.
       (and (/= depth 9)
            (or (named-let recur ((tail (-dict-break-start dict)))
                  (when tail
@@ -1439,26 +1536,6 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                                                    (1+ depth))))))
                        (recur (cdr tail))))))))))
 
-(defun -number-p (s)
-;; Return non-nil if S looks like a number (possibly with . , -
-;; separators).
-  (if (string-empty-p s)
-      nil
-    (let ((i 0) (n (length s)) (done nil) (result nil))
-      (when (eq (aref s 0) ?-) (setq i 1))
-      (while (and (< i n) (not done))
-        (let ((start i))
-          (while (and (< i n) (<= ?0 (aref s i) ?9)) (setq i (1+ i)))
-          (cond
-           ((= i start) (setq done t result nil))
-           ((= i n) (setq done t result t))
-           (t
-            (let ((c (aref s i)))
-              (if (memq c '(?. ?, ?-))
-                  (setq i (1+ i))
-                (setq done t result nil)))))))
-      result)))
-
 (defun -erase-chars (s chars)
   (if (string-empty-p chars)
       s
@@ -1477,21 +1554,21 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 
 (defun -spell (dict word)
   (setq word (-substr-replace (-dict-input-iconv dict) word))
-  (if (string-empty-p word)
-      t
-    (let ((abbreviation (eq (aref word (1- (length word))) ?.)))
-      (when abbreviation
-        (setq word (substring word 0 (-string-last-non-dot word))))
-      (if (string-empty-p word)
-          t
-        (if (-number-p word)
-            t
-          (progn
-            (setq word (-erase-chars word (-dict-ignored-chars dict)))
-            (let ((ret (-spell-break dict word 0)))
-              (if (and (not ret) abbreviation)
-                  (-spell-break dict (concat word ".") 0)
-                ret))))))))
+  (or (string-empty-p word)
+      (let ((abbreviation (eq (aref word (1- (length word))) ?.)))
+        (when abbreviation
+          (setq word (substring word 0 (-string-last-non-dot word))))
+        (or (string-empty-p word)
+            ;; A number, possibly with . , - separators, is correct.
+            (and (string-match-p (rx bos (? "-") (+ digit) (* (any ".,-") (+ digit)) eos)
+                                 word)
+                 t)
+            (progn
+              (setq word (-erase-chars word (-dict-ignored-chars dict)))
+              (let ((ret (-spell-break dict word 0)))
+                (if (and (not ret) abbreviation)
+                    (-spell-break dict (concat word ".") 0)
+                  ret)))))))
 
 ;;;; Suggestions
 ;;
@@ -1519,7 +1596,9 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; HEAD/TAIL support O(1) `-sugs-push' (appending, the common case),
 ;; and COUNT is kept in sync so callers do not need to walk the list
 ;; to learn its length.
-  head tail (count 0))
+  (head nil :type list)
+  (tail nil :type list)                ; last cons of HEAD
+  (count 0 :type natnum))
 
 (defun -sugs-push (box word)
 ;; Append WORD to the end of BOX's suggestion list.
@@ -1563,8 +1642,9 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;;;; length * affix table size) or worse
 
 ;; Count of remaining suggestion attempts.  Each algorithm below that
-;; is capped by it let-binds it to `-max-attempts-for-long-algos'.
-(defvar -budget 0)
+;; is capped by it let-binds it to `-max-attempts-for-long-algos'; it
+;; has no global value, so a use outside such a binding is an error.
+(defvar -budget)
 
 (defun -budget-consume ()
 ;; Consume one unit of `-budget'; return non-nil if one was available.
@@ -1738,13 +1818,12 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; Nuspell additionally tries.  Mirrors Nuspell's
 ;; `Suggester::adjacent_swap_suggest'.
   (let ((len (length word)))
-    (when (> len 0)
-      (dotimes (i (1- len))
-        (-add-sug-if-correct dict (-swap-adjacent word i) box))
-      (pcase len
-        (4 (-add-sug-if-correct dict (-swap-two-pairs word 0 2) box))
-        (5 (-add-sug-if-correct dict (-swap-two-pairs word 0 3) box)
-           (-add-sug-if-correct dict (-swap-two-pairs word 1 3) box))))))
+    (dotimes (i (1- len))
+      (-add-sug-if-correct dict (-swap-adjacent word i) box))
+    (pcase len
+      (4 (-add-sug-if-correct dict (-swap-two-pairs word 0 2) box))
+      (5 (-add-sug-if-correct dict (-swap-two-pairs word 0 3) box)
+         (-add-sug-if-correct dict (-swap-two-pairs word 1 3) box)))))
 
 (defun -distant-swap-suggest (dict word box)
 ;; Try swapping each pair of non-adjacent characters of WORD.  Mirrors
@@ -1801,7 +1880,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
   (let* ((len (length word))
          (-budget (-max-attempts-for-long-algos dict word)))
     (dotimes (i1 len)
-      (dotimes (k (max 0 (- len i1 2)))
+      (dotimes (k (- len i1 2))
         (when (-budget-consume)
           (-add-sug-if-correct dict (-move-char-forward word i1 (+ i1 2 k)) box))))
     (dotimes (i1 len)
@@ -1842,7 +1921,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
           (let ((candidate (concat w1 " " w2)))
             (unless (member candidate (-sugs-list box))
               (-sugs-push box candidate)))
-          (when (and (> (1+ i) 1) (> (length w2) 1)
+          (when (and (>= i 1) (length> w2 1)
                      (or (cl-position ?a try-chars) (cl-position ?- try-chars)))
             (let ((candidate (concat w1 "-" w2)))
               (unless (member candidate (-sugs-list box))
@@ -1970,14 +2049,13 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; Return the length of A and B's common prefix.  The first character
 ;; is matched case-insensitively; the rest are not.  Mirrors Nuspell's
 ;; `left_common_substring_length'.
-  (if (or (string-empty-p a) (string-empty-p b))
+  (if (or (string-empty-p a) (string-empty-p b)
+          (and (/= (aref a 0) (aref b 0)) (/= (aref a 0) (downcase (aref b 0)))))
       0
-    (if (and (/= (aref a 0) (aref b 0)) (/= (aref a 0) (downcase (aref b 0))))
-        0
-      (let ((n (min (length a) (length b))) (i 1))
-        (while (and (< i n) (eq (aref a i) (aref b i)))
-          (setq i (1+ i)))
-        i))))
+    (let ((n (min (length a) (length b))) (i 1))
+      (while (and (< i n) (eq (aref a i) (aref b i)))
+        (setq i (1+ i)))
+      i)))
 
 (defun -longest-common-subsequence-length (a b)
 ;; Return the length of the longest common subsequence of A and B.
@@ -2000,7 +2078,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; at the same position in both; when A and B are the same length and
 ;; exactly 2 positions differ, IS-SWAP says whether those two
 ;; differing characters are a transposition of each other.
-  (let* ((n (min (length a) (length b))) (count 0))
+  (let ((n (min (length a) (length b))) (count 0))
     (dotimes (i n)
       (when (eq (aref a i) (aref b i)) (setq count (1+ count))))
     (let (is-swap m1 m2)
@@ -2020,7 +2098,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; as a pruning optimization only.  Mirrors Nuspell's
 ;; `Suggester::expand_root_word_for_ngram'.
   (let ((base (unless (-flags-contain flags (-dict-need-affix-flag dict)) (list root)))
-        suffixed cross-ok combo prefixed)
+        suffixed cross-suffixed combo prefixed)
     (when flags
       (dolist (sfx (-all-affix-table-entries (-dict-suffix-table dict)))
         (when (and (-cross-valid-p flags (-suffix-flag sfx))
@@ -2031,21 +2109,19 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                    (or (string-empty-p (-suffix-appending sfx))
                        (string-suffix-p (-suffix-appending sfx) wrong)))
           (push (-suffix-from-root sfx root) suffixed)
-          (push (-suffix-cross-product sfx) cross-ok)))
-      (setq suffixed (nreverse suffixed) cross-ok (nreverse cross-ok))
-      (cl-mapc
-       (lambda (root-sfx ok)
-         (when ok
-           (dolist (pfx (-all-affix-table-entries (-dict-prefix-table dict)))
-             (when (and (-cross-valid-p flags (-prefix-flag pfx))
-                        (not (-outer-prefix-not-valid-p :full-word pfx))
-                        (not (-prefix-circumfix-p pfx))
-                        (string-prefix-p (-prefix-stripping pfx) root-sfx)
-                        (-prefix-check-condition pfx root-sfx)
-                        (or (string-empty-p (-prefix-appending pfx))
-                            (string-prefix-p (-prefix-appending pfx) wrong)))
-               (push (-prefix-from-root pfx root-sfx) combo)))))
-       suffixed cross-ok)
+          (when (-suffix-cross-product sfx)
+            (push (car suffixed) cross-suffixed))))
+      (setq suffixed (nreverse suffixed))
+      (dolist (root-sfx (nreverse cross-suffixed))
+        (dolist (pfx (-all-affix-table-entries (-dict-prefix-table dict)))
+          (when (and (-cross-valid-p flags (-prefix-flag pfx))
+                     (not (-outer-prefix-not-valid-p :full-word pfx))
+                     (not (-prefix-circumfix-p pfx))
+                     (string-prefix-p (-prefix-stripping pfx) root-sfx)
+                     (-prefix-check-condition pfx root-sfx)
+                     (or (string-empty-p (-prefix-appending pfx))
+                         (string-prefix-p (-prefix-appending pfx) wrong)))
+            (push (-prefix-from-root pfx root-sfx) combo))))
       (dolist (pfx (-all-affix-table-entries (-dict-prefix-table dict)))
         (when (and (-cross-valid-p flags (-prefix-flag pfx))
                    (not (-outer-prefix-not-valid-p :full-word pfx))
@@ -2119,7 +2195,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
     ;; Each root is (SCORE WORD LOWER FLAGS), sharing its tail with the
     ;; `-ngram-candidates' entry.
     (setq roots (mapcan (lambda (e) (and (cddr e) (list (cons (car e) (cddr e)))))
-                        (sort top-roots :reverse t :in-place t)))
+                        ;; For Emacs ≤29
+                        (compat-call sort top-roots :reverse t :in-place t)))
 
     (let ((threshold 0))
       (dolist (k '(1 2 3))
@@ -2128,7 +2205,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
             ;; Can't `aset' an arbitrary character in place: Emacs
             ;; strings are not necessarily uniform-width internally,
             ;; so replacing e.g. a 2-byte-wide character with a
-            ;; 1-byte-wide "*" can fail; rebuild instead.
+            ;; 1-byte-wide "*" can fail; rebuild instead, see (elisp)
+            ;; Modifying Strings.
             (setq mangled (concat (substring mangled 0 i) "*" (substring mangled (1+ i))))
             (setq i (+ i 4)))
           (setq threshold (+ threshold
@@ -2147,11 +2225,11 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                      (score (+ (-left-common-substring-length wrong-word expanded)
                                (-ngram-similarity-any-mismatch
                                 (length wrong-word) wrong-word lower wrong-grams))))
-                (when (and (>= score threshold)
-                           (>= score (car (aref top-guesses 0))))
+                (when (>= score (max (car (aref top-guesses 0)) threshold))
                   (-heap-replace top-guesses (cons score (cons (incf guess-idx) expanded))))))))
         (setq guesses (mapcan (lambda (e) (and (cddr e) (list (cons (car e) (cddr e)))))
-                              (sort top-guesses :reverse t :in-place t)))
+                              ;; For Emacs ≤29
+                              (compat-call sort top-guesses :reverse t :in-place t)))
 
         (named-let recur ((tail guesses))
           (when tail
@@ -2159,8 +2237,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
                   (pcase-let ((`(,score . ,word) g))
                     (let* ((lower (downcase word))
                            (lcs (-longest-common-subsequence-length wrong-word lower)))
-                      (if (and (= (length wrong-word) (length lower))
-                               (= (length wrong-word) lcs))
+                      (if (= (length wrong-word) (length lower) lcs)
                           (progn (setcar g (+ score 2000)) t)
                         (let* ((ngram2 (+ (-ngram-similarity-any-mismatch-weighted 2 wrong-word lower wrong-grams)
                                           (-ngram-similarity-any-mismatch-weighted 2 lower wrong-word)))
@@ -2211,16 +2288,16 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 ;; self near the top of this file).
   (let (fixed rest)
     (dolist (sug (-sugs-list box))
-      (let ((space (string-search " " sug)))
-        (if (not space)
-            (push sug rest)
-          (let* ((i (1+ space)) (len (- (length sug) i)))
-            (if (and (<= len (length word))
-                     (string= (substring sug i) (substring word (- (length word) len))))
-                (push sug rest)
-              (push (concat (substring sug 0 i) (-to-title-char-at (substring sug i) 0))
-                    fixed))))))
-    (-sugs-box-set box (append (nreverse fixed) (nreverse rest)))))
+      (if-let* ((space (string-search " " sug))
+                (i (1+ space))
+                (len (- (length sug) i)))
+          (if (and (<= len (length word))
+                   (eq t (compare-strings sug i nil word (- (length word) len) nil)))
+              (push sug rest)
+            (push (concat (substring sug 0 i) (-to-title-char-at (substring sug i) 0))
+                  fixed))
+        (push sug rest)))
+    (-sugs-box-set box (nreverse (nconc rest fixed)))))
 
 (defun -fix-keepcase-sug (dict s)
 ;; Return S, possibly lower- or title-cased, or nil to drop it.  Used
@@ -2232,16 +2309,6 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
    ((-spell dict s) s)
    ((-spell dict (downcase s)) (downcase s))
    (t (let ((title (-to-title s))) (and (-spell dict title) title)))))
-
-(defun -dedup-preserve-first (list)
-;; Return LIST with duplicates removed, keeping each value's first
-;; occurrence.
-  (let (seen result)
-    (dolist (s list)
-      (unless (member s seen)
-        (push s seen)
-        (push s result)))
-    (nreverse result)))
 
 (defun -suggest-dash-split (dict box word)
 ;; If WORD contains a hyphen, also try correcting it piece by piece.
@@ -2332,9 +2399,11 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 
     (when (and (memq casing '(init-capital all-capital))
                (or (/= 0 (-dict-keepcase-flag dict)) (/= 0 (-dict-forbiddenword-flag dict))))
-      (-sugs-box-set box (delq nil (mapcar (lambda (s) (-fix-keepcase-sug dict s)) (-sugs-list box)))))
+      (-sugs-box-set box (mapcan (lambda (s)
+                                   (and-let* ((x (-fix-keepcase-sug dict s))) (list x)))
+                                 (-sugs-list box))))
 
-    (-sugs-box-set box (-dedup-preserve-first (-sugs-list box)))
+    (-sugs-box-set box (delete-dups (-sugs-list box)))
 
     ;; OCONV can map a suggestion back to WORD itself (e.g. "románórum"
     ;; to "romanórum"); drop it then, as Hunspell does (its gh#1002).
@@ -2487,10 +2556,14 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
 
 ;;;; Affix (.aff) parsing
 
-(defun -chomp-cr (line)
-  (if (and (> (length line) 0) (eq (aref line (1- (length line))) ?\r))
-      (substring line 0 -1)
-    line))
+(defun -current-line ()
+;; Return the text of the current line, without text properties and
+;; without a trailing CR (as in files with DOS line endings that were
+;; not decoded as such).
+  (let ((bol (pos-bol)) (eol (pos-eol)))
+    (when (and (> eol bol) (eq (char-before eol) ?\r))
+      (setq eol (1- eol)))
+    (buffer-substring-no-properties bol eol)))
 
 (defun -array-command-step (cmd-counts command count-token)
 ;; Advance array-COMMAND state in CMD-COUNTS.  Return `header' when
@@ -2585,6 +2658,10 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
     (dolist (p patterns)
       (cond
        ((or (string-empty-p p) (string= p "^") (string= p "$")))
+       ;; A pattern with both anchors, like "^-$", counts as a start
+       ;; pattern, keeping the "$" as a literal character; as in
+       ;; Nuspell, which checks for "^" first.  Such a pattern is
+       ;; meaningless anyway (Hunspell doesn't make sense of it either).
        ((eq (aref p 0) ?^) (push (substring p 1) start))
        ((eq (aref p (1- (length p))) ?$) (push (substring p 0 -1) end))
        (t (push p middle))))
@@ -2657,7 +2734,8 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
         (push p (gethash (aref (car p) 0) table))))
     (when (> (hash-table-count table) 0)
       (maphash (lambda (c ps)
-                 (puthash c (sort ps :key (lambda (p) (length (car p))) :reverse t)
+                 (puthash c (compat-call ;; For Emacs ≤29
+                             sort ps :key (lambda (p) (length (car p))) :reverse t)
                           table))
                table)
       table)))
@@ -2731,7 +2809,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
   (let (edge inner)
     (dotimes (i (length wordchars))
       (let ((c (aref wordchars i)))
-        (cond ((memq c '(?' ?’)) (setq inner (append '(?' ?’) inner)))
+        (cond ((memq c '(?' ?\’)) (setq inner (append '(?' ?\’) inner)))
               ((eq (get-char-code-property c 'general-category) 'Pd) (push c inner))
               (t (push c edge)))))
     (rx-to-string `(seq (any alpha ,@edge)
@@ -2764,127 +2842,111 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
           (cmd-affix (make-hash-table :test 'equal))
           (cmd-counts (make-hash-table :test 'equal)))
       (while (not (eobp))
-        (let* ((line (-chomp-cr (buffer-substring-no-properties (pos-bol) (pos-eol))))
+        (let* ((line (-current-line))
                (trimmed (string-trim-left line)))
           (unless (or (string= trimmed "") (eq (aref trimmed 0) ?#))
             (let* ((tokens (split-string line))
                    (command (upcase (car tokens)))
                    (args (cdr tokens)))
-              (cond
-               ((or (string= command "PFX") (string= command "SFX"))
-                (let ((affix (-parse-aff-affix-line dict command args cmd-affix)))
-                  (when affix
-                    (if (string= command "PFX")
-                        (push affix prefixes)
-                      (push affix suffixes)))))
-               ((string= command "FLAG")
-                (setf (-dict-flag-type dict)
-                      (cond ((string= (upcase (car args)) "LONG") 'long)
-                            ((string= (upcase (car args)) "NUM") 'num)
-                            ((string= (upcase (car args)) "UTF-8") 'utf-8)
-                            (t (error "vibe-spell: invalid FLAG type %S" (car args))))))
-               ((string= command "IGNORE")
-                (setf (-dict-ignored-chars dict) (car args)))
-               ((string= command "TRY")
-                (setf (-dict-try-chars dict) (car args)))
-               ((string= command "WORDCHARS")
-                (setq wordchars (car args)))
-               ((string= command "KEY")
-                (setf (-dict-keyboard-closeness dict) (car args)))
-               ((string= command "COMPLEXPREFIXES")
-                (setf (-dict-complex-prefixes dict) t))
-               ((string= command "FULLSTRIP")
-                (setf (-dict-fullstrip dict) t))
-               ((string= command "CHECKSHARPS")
-                (setf (-dict-checksharps dict) t))
-               ((string= command "FORBIDWARN")
-                (setf (-dict-forbid-warn dict) t))
-               ((string= command "WARN")
-                (setf (-dict-warn-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "CIRCUMFIX")
-                (setf (-dict-circumfix-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "FORBIDDENWORD")
-                (setf (-dict-forbiddenword-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "KEEPCASE")
-                (setf (-dict-keepcase-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "NEEDAFFIX")
-                (setf (-dict-need-affix-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "NOSUGGEST")
-                (setf (-dict-nosuggest-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "MAXNGRAMSUGS")
-                (setf (-dict-max-ngram-suggestions dict) (string-to-number (car args))))
-               ((string= command "MAXDIFF")
-                (let ((v (string-to-number (car args))))
-                  (setf (-dict-max-diff-factor dict) (if (> v 10) 5 v))))
-               ((string= command "ONLYMAXDIFF")
-                (setf (-dict-only-max-diff dict) t))
-               ((string= command "COMPOUNDFLAG")
-                (setf (-dict-compound-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "COMPOUNDBEGIN")
-                (setf (-dict-compound-begin-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "COMPOUNDEND")
-                (setf (-dict-compound-last-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "COMPOUNDMIDDLE")
-                (setf (-dict-compound-middle-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "ONLYINCOMPOUND")
-                (setf (-dict-compound-onlyin-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "COMPOUNDPERMITFLAG")
-                (setf (-dict-compound-permit-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "COMPOUNDFORBIDFLAG")
-                (setf (-dict-compound-forbid-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "COMPOUNDROOT")
-                (setf (-dict-compound-root-flag dict) (-decode-first-flag dict (car args))))
-               ((string= command "FORCEUCASE")
-                (setf (-dict-compound-force-uppercase dict) (-decode-first-flag dict (car args))))
-               ((string= command "COMPOUNDMIN")
-                (let ((v (string-to-number (car args))))
-                  (setf (-dict-compound-min-length dict) (if (= v 0) 1 v))))
-               ((string= command "COMPOUNDWORDMAX")
-                (setf (-dict-compound-max-word-count dict) (string-to-number (car args))))
-               ((string= command "CHECKCOMPOUNDCASE")
-                (setf (-dict-compound-check-case dict) t))
-               ((string= command "CHECKCOMPOUNDDUP")
-                (setf (-dict-compound-check-duplicate dict) t))
-               ((string= command "CHECKCOMPOUNDTRIPLE")
-                (setf (-dict-compound-check-triple dict) t))
-               ((string= command "CHECKCOMPOUNDREP")
-                (setf (-dict-compound-check-rep dict) t))
-               ((string= command "AF")
-                (pcase (-array-command-step cmd-counts command (car args))
-                  ('data
-                   (push (-decode-flags dict (car args)) flag-aliases)
-                   ;; Kept live (not just set once at the end) so that
-                   ;; PFX/SFX continuation flags and COMPOUNDRULE lines
-                   ;; later in this same file can resolve aliases too.
-                   (setf (-dict-flag-aliases dict) (vconcat (reverse flag-aliases))))))
-               ((string= command "BREAK")
-                (setq break-seen t)
-                (pcase (-array-command-step cmd-counts command (car args))
-                  ('data (push (car args) break-patterns))))
-               ((string= command "COMPOUNDRULE")
-                (pcase (-array-command-step cmd-counts command (car args))
-                  ('data (push (-parse-compound-rule-line dict (car args))
-                               compound-rules))))
-               ((string= command "CHECKCOMPOUNDPATTERN")
-                (pcase (-array-command-step cmd-counts command (car args))
-                  ('data (when-let* ((p (-parse-compound-pattern dict args)))
-                           (push p compound-patterns)))))
-               ((string= command "REP")
-                (pcase (-array-command-step cmd-counts command (car args))
-                  ('data (push (cons (nth 0 args) (string-replace "_" " " (nth 1 args)))
-                               rep-pairs))))
-               ((string= command "MAP")
-                (pcase (-array-command-step cmd-counts command (car args))
-                  ('data (push (-parse-similarity-group (car args)) similarities))))
-               ((string= command "ICONV")
-                (pcase (-array-command-step cmd-counts command (car args))
-                  ('data (push (cons (nth 0 args) (nth 1 args)) iconv-pairs))))
-               ((string= command "OCONV")
-                (pcase (-array-command-step cmd-counts command (car args))
-                  ('data (push (cons (nth 0 args) (nth 1 args)) oconv-pairs))))
-               ((member command '("PHONE" "AM"))
-                (-array-command-step cmd-counts command (car args)))
-               (t nil)))))
+              (pcase command
+                ((or "PFX" "SFX")
+                 (when-let* ((affix (-parse-aff-affix-line dict command args cmd-affix)))
+                   (if (string= command "PFX")
+                       (push affix prefixes)
+                     (push affix suffixes))))
+                ("FLAG"
+                 (setf (-dict-flag-type dict)
+                       (pcase (upcase (car args))
+                         ("LONG" 'long)
+                         ("NUM" 'num)
+                         ("UTF-8" 'utf-8)
+                         (_ (error "vibe-spell: invalid FLAG type %S" (car args))))))
+                ("IGNORE" (setf (-dict-ignored-chars dict) (car args)))
+                ("TRY" (setf (-dict-try-chars dict) (car args)))
+                ("WORDCHARS" (setq wordchars (car args)))
+                ("KEY" (setf (-dict-keyboard-closeness dict) (car args)))
+                ("COMPLEXPREFIXES" (setf (-dict-complex-prefixes dict) t))
+                ("FULLSTRIP" (setf (-dict-fullstrip dict) t))
+                ("CHECKSHARPS" (setf (-dict-checksharps dict) t))
+                ("FORBIDWARN" (setf (-dict-forbid-warn dict) t))
+                ("WARN" (setf (-dict-warn-flag dict) (-decode-first-flag dict (car args))))
+                ("CIRCUMFIX"
+                 (setf (-dict-circumfix-flag dict) (-decode-first-flag dict (car args))))
+                ("FORBIDDENWORD"
+                 (setf (-dict-forbiddenword-flag dict) (-decode-first-flag dict (car args))))
+                ("KEEPCASE" (setf (-dict-keepcase-flag dict) (-decode-first-flag dict (car args))))
+                ("NEEDAFFIX"
+                 (setf (-dict-need-affix-flag dict) (-decode-first-flag dict (car args))))
+                ("NOSUGGEST"
+                 (setf (-dict-nosuggest-flag dict) (-decode-first-flag dict (car args))))
+                ("MAXNGRAMSUGS"
+                 (setf (-dict-max-ngram-suggestions dict) (string-to-number (car args))))
+                ("MAXDIFF"
+                 (let ((v (string-to-number (car args))))
+                   (setf (-dict-max-diff-factor dict) (if (> v 10) 5 v))))
+                ("ONLYMAXDIFF" (setf (-dict-only-max-diff dict) t))
+                ("COMPOUNDFLAG"
+                 (setf (-dict-compound-flag dict) (-decode-first-flag dict (car args))))
+                ("COMPOUNDBEGIN"
+                 (setf (-dict-compound-begin-flag dict) (-decode-first-flag dict (car args))))
+                ("COMPOUNDEND"
+                 (setf (-dict-compound-last-flag dict) (-decode-first-flag dict (car args))))
+                ("COMPOUNDMIDDLE"
+                 (setf (-dict-compound-middle-flag dict) (-decode-first-flag dict (car args))))
+                ("ONLYINCOMPOUND"
+                 (setf (-dict-compound-onlyin-flag dict) (-decode-first-flag dict (car args))))
+                ("COMPOUNDPERMITFLAG"
+                 (setf (-dict-compound-permit-flag dict) (-decode-first-flag dict (car args))))
+                ("COMPOUNDFORBIDFLAG"
+                 (setf (-dict-compound-forbid-flag dict) (-decode-first-flag dict (car args))))
+                ("COMPOUNDROOT"
+                 (setf (-dict-compound-root-flag dict) (-decode-first-flag dict (car args))))
+                ("FORCEUCASE"
+                 (setf (-dict-compound-force-uppercase dict) (-decode-first-flag dict (car args))))
+                ("COMPOUNDMIN"
+                 (let ((v (string-to-number (car args))))
+                   (setf (-dict-compound-min-length dict) (if (= v 0) 1 v))))
+                ("COMPOUNDWORDMAX"
+                 (setf (-dict-compound-max-word-count dict) (string-to-number (car args))))
+                ("CHECKCOMPOUNDCASE" (setf (-dict-compound-check-case dict) t))
+                ("CHECKCOMPOUNDDUP" (setf (-dict-compound-check-duplicate dict) t))
+                ("CHECKCOMPOUNDTRIPLE" (setf (-dict-compound-check-triple dict) t))
+                ("CHECKCOMPOUNDREP" (setf (-dict-compound-check-rep dict) t))
+                ("AF"
+                 (pcase (-array-command-step cmd-counts command (car args))
+                   ('data
+                    (push (-decode-flags dict (car args)) flag-aliases)
+                    ;; Kept live (not just set once at the end) so that
+                    ;; PFX/SFX continuation flags and COMPOUNDRULE lines
+                    ;; later in this same file can resolve aliases too.
+                    (setf (-dict-flag-aliases dict) (vconcat (reverse flag-aliases))))))
+                ("BREAK"
+                 (setq break-seen t)
+                 (when (eq (-array-command-step cmd-counts command (car args)) 'data)
+                   (push (car args) break-patterns)))
+                ("COMPOUNDRULE"
+                 (pcase (-array-command-step cmd-counts command (car args))
+                   ('data (push (-parse-compound-rule-line dict (car args))
+                                compound-rules))))
+                ("CHECKCOMPOUNDPATTERN"
+                 (pcase (-array-command-step cmd-counts command (car args))
+                   ('data (when-let* ((p (-parse-compound-pattern dict args)))
+                            (push p compound-patterns)))))
+                ("REP"
+                 (pcase (-array-command-step cmd-counts command (car args))
+                   ('data (push (cons (nth 0 args) (string-replace "_" " " (nth 1 args)))
+                                rep-pairs))))
+                ("MAP"
+                 (pcase (-array-command-step cmd-counts command (car args))
+                   ('data (push (-parse-similarity-group (car args)) similarities))))
+                ("ICONV"
+                 (pcase (-array-command-step cmd-counts command (car args))
+                   ('data (push (cons (nth 0 args) (nth 1 args)) iconv-pairs))))
+                ("OCONV"
+                 (pcase (-array-command-step cmd-counts command (car args))
+                   ('data (push (cons (nth 0 args) (nth 1 args)) oconv-pairs))))
+                ((or "PHONE" "AM")
+                 (-array-command-step cmd-counts command (car args)))))))
         (forward-line 1))
       ;; As in Nuspell, ignored characters are erased from each affix's
       ;; appended text (but not from its stripped text) once parsing is
@@ -2958,8 +3020,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
         (insert-file-contents file)
         (goto-char (point-min))
         (while (not (eobp))
-          (let ((word (-chomp-cr (buffer-substring-no-properties
-                                  (pos-bol) (pos-eol)))))
+          (let ((word (-current-line)))
             (unless (string-empty-p word)
               (-dict-add-word dict word nil)))
           (forward-line 1))))))
@@ -2979,7 +3040,7 @@ vibe-spell: cannot find %s.aff and %s.dic under `vibe-spell-dictionary-path'"
       (goto-char (point-min))
       (let (removed)
         (while (not (eobp))
-          (if (string= (-chomp-cr (buffer-substring-no-properties (pos-bol) (pos-eol))) word)
+          (if (string= (-current-line) word)
               (progn (delete-region (pos-bol) (min (point-max) (1+ (pos-eol))))
                      (setq removed t))
             (forward-line 1)))
